@@ -1,0 +1,21 @@
+{
+  "_comment": "本文件是 .mcp.json 模板。__CLENV_MCP_DIR__ 会被 install.sh / clenv init 替换成 mcp/servers 的绝对路径。可按需删掉不用的服务器。",
+  "mcpServers": {
+    "clenv-lang": {
+      "command": "python3",
+      "args": ["__CLENV_MCP_DIR__/lang_mcp.py"]
+    },
+    "clenv-codec": {
+      "command": "python3",
+      "args": ["__CLENV_MCP_DIR__/codec_mcp.py"]
+    },
+    "clenv-reverse": {
+      "command": "python3",
+      "args": ["__CLENV_MCP_DIR__/reverse_mcp.py"]
+    },
+    "clenv-codeplatform": {
+      "command": "python3",
+      "args": ["__CLENV_MCP_DIR__/codeplatform_mcp.py"]
+    }
+  }
+}
