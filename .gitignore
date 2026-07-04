@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+.venv/
+venv/
+node_modules/
+
+# 本地私密设置（绝不入库）
+.claude/settings.local.json
+*.env
+.env
+.env.*
+
+# 编辑器/系统
+.DS_Store
+*.swp
