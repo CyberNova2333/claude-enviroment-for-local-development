@@ -98,26 +98,36 @@ curl -fsSL <install.sh-URL> | bash -s -- --silent
 
 ## 1) 环境部署脚本 `setup-environments.sh`
 
-五大分类，共 36 个可安装项：
+七大分类，共 47 个可安装项：
 
 | 分类 | 项目 |
 |---|---|
-| `lang`（语言，无头） | python、node、go、rust、java、ruby |
+| `lang`（语言，无头） | python、node、go、rust、java、ruby、**cpp**（gcc/g++/make/cmake/gdb）、**clang**、**dotnet**(C#)、**php** |
 | `codec`（文件编解码/取证） | ffmpeg、imagemagick、jq、yq、pandoc、7z、protobuf、poppler、xxd、exiftool、tesseract、sqlite3、mediainfo、file |
-| `reverse`（逆向/静态分析） | apktool、jadx、dex2jar、radare2、binwalk、frida、binutils、gdb、checksec |
+| `reverse`（逆向/静态分析） | apktool、jadx、dex2jar、radare2、binwalk、frida、binutils、checksec、**adb**(安卓) |
+| `debug`（调试） | gdb、lldb、valgrind、strace、ltrace |
 | `vcs`（代码平台） | git、gh(GitHub CLI)、glab(GitLab CLI)、curl、wget |
 | `devtools`（开发辅助） | shellcheck、ruff、pytest |
+| `container`（容器） | docker |
+
+覆盖常用语言的**无头开发+调试**（C/C++ 用 gcc/gdb/valgrind，C# 用 .NET SDK，Python/Java/Go/
+Rust/PHP 等）与**平台逆向/调试**（安卓：apktool/jadx/frida/adb；Linux 二进制：radare2/gdb/
+objdump/strace/ltrace）。
 
 ```bash
 setup-environments.sh list                 # 列出全部分类与项目
 setup-environments.sh doctor               # 只检测、打印各项版本
-setup-environments.sh lang codec           # 按分类安装
-setup-environments.sh python ffmpeg gh     # 按单项安装
-setup-environments.sh all                  # 全部（较重）
+setup-environments.sh lang debug           # 按分类安装
+setup-environments.sh cpp dotnet adb       # 按单项安装
+setup-environments.sh all                  # 全部（不含 container）
 ```
 
 特点：自动探测包管理器（apt/dnf/yum/pacman/apk/zypper/brew）；已安装则跳过；
 系统包不可用时回退到官方二进制/tar 包/pip；下载失败自动退避重试；失败项汇总到末尾，可单独重试。
+
+**源码编译兜底（最后手段）**：当系统包与二进制都拿不到时，对可源码构建的工具（如 `jq`）会
+自动装好编译工具链（gcc/make/autoconf 等）并 `git clone` 源码本地编译安装，见
+`scripts/lib/common.sh` 的 `build_from_source` / `ensure_build_toolchain`。
 
 **指定版本（`name@version`）**：部分项支持精确版本安装 ——
 `node`、`go`、`rust`、`yq`、`apktool`、`jadx`、`dex2jar`、`glab`、`ruff`、`pytest`、`frida`。
@@ -154,10 +164,16 @@ setup-environments.sh go@1.21.0 node@20.11.1 yq@4.44.3   # 或 clenv env install
 ## 3) 管理命令 `clenv`
 
 ```bash
-# 环境
-clenv env list                 # 列出可安装项
+# 环境（类 apt 用法：查/装/卸/更新一应俱全）
+clenv env list                 # 列出全部可安装项与分类
+clenv env search ocr           # 按名称/说明/分类搜索
+clenv env info gdb             # 查看某项说明、命令、是否已装、安装方式
+clenv env installed            # 列出已安装项
+clenv env install cpp jq gh    # 安装（可加 @版本，如 go@1.21.0）
+clenv env remove ffmpeg        # 卸载（先删本项目产物，再按需卸系统包）
+clenv env update               # 刷新包索引（≈ apt update）
+clenv env upgrade yq           # 升级某项（卸后重装最新）
 clenv env doctor               # 环境自检
-clenv env install ffmpeg jq gh # 安装若干项
 
 # 虚拟环境
 clenv venv create .venv                 # 建 Python venv
@@ -169,6 +185,13 @@ clenv init my-project --name my-project --permissions standard --mcp all
 #   --permissions  safe | standard | loose  （命令允许范围模板）
 #   --mcp          all | none | 逗号分隔（lang,codec,reverse,codeplatform）
 #   --claude-file  指令文件名（默认 CLAUDE.md）  --force 覆盖
+#   --docker       启用 Docker 模式（见下文），可配 --docker-image / --docker-envs
+
+# Docker 模式（详见「4) Docker 模式」）
+clenv docker build             # 构建/更新镜像
+clenv docker shell             # 进入挂载了本目录的容器
+clenv docker run -- <命令>     # 在容器内跑一条命令（或用生成的 ./cdev <命令>）
+clenv docker status            # 查看镜像/构建/是否需重建
 
 # MCP
 clenv mcp list                 # 列出可用 MCP 服务器
@@ -206,7 +229,41 @@ clenv config permissions loose               # init 默认权限模板
 
 ---
 
-## 4) 总安装脚本 `install.sh`
+## 4) Docker 模式（安全可控的隔离环境）
+
+在项目文件夹里选择 **Docker 模式**，整套环境就跑在一个**挂载了该文件夹**的容器里：
+宿主机不被污染，容器退出即弃，改动通过挂载即时可见。
+
+```bash
+clenv init my-project --docker --docker-image ubuntu:24.04 --docker-envs "lang debug jq"
+cd my-project
+clenv docker build        # 首次构建（会自动检测 docker，缺失则自动安装）
+./cdev python3 app.py     # 在容器内运行；等价 clenv docker run -- python3 app.py
+clenv docker shell        # 进入容器交互 shell（工作目录即挂载的项目目录）
+```
+
+`clenv init --docker` 会在项目目录生成：
+
+| 文件 | 作用 |
+|---|---|
+| `Dockerfile` | 基于所选镜像，装好 clenv 与 `--docker-envs` 指定的环境，`WORKDIR /workspace` |
+| `.dockerignore` | 构建上下文忽略清单 |
+| `.clenv-docker.json` | 记录镜像名、基础镜像、预装环境、Dockerfile 指纹 |
+| `cdev` | 便捷封装：`./cdev <命令>` = 在挂载本目录的容器里执行 |
+
+要点：
+
+- **自动检测/安装 Docker**：`clenv docker build/run` 若发现 `docker` 缺失，会自动
+  `clenv env install docker`（官方脚本优先，失败回退发行版包）；守护进程未运行会明确提示。
+- **改动后自动重建**：在宿主机项目目录里改了 `Dockerfile`（或改配置后重生成），下次
+  `clenv docker build/run` 会比对 Dockerfile 指纹，**检测到变化即自动重建镜像**以反映更改；
+  未变化则跳过构建、直接复用。
+- **挂载运行**：`docker run --rm -v <项目目录>:/workspace -w /workspace <镜像> <命令>`，
+  容器内对 `/workspace` 的改动就是对宿主机项目目录的改动。
+
+---
+
+## 5) 总安装脚本 `install.sh`
 
 见顶部「一键安装」。它负责：把 `clenv`、`setup-environments.sh` 软链（或复制）到
 `~/.local/bin`、写入 PATH、把仓库根记录进 `~/.config/clenv/config.json`（让 `clenv` 在

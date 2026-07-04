@@ -200,17 +200,85 @@ def run_setup(args_list):
     return subprocess.call(["bash", script] + args_list)
 
 
+def setup_meta():
+    """调用 setup-environments.sh meta，解析为 [{name,category,cmd,installed,desc}]。"""
+    script = setup_script()
+    if not os.path.isfile(script):
+        return []
+    try:
+        out = subprocess.run(["bash", script, "meta"], capture_output=True,
+                             text=True, timeout=30).stdout
+    except Exception:  # noqa: BLE001
+        return []
+    items = []
+    for ln in out.splitlines():
+        parts = ln.split("|")
+        if len(parts) >= 5:
+            items.append({"name": parts[0], "category": parts[1], "cmd": parts[2],
+                          "installed": parts[3] == "1", "desc": parts[4]})
+    return items
+
+
 def cmd_env(args):
+    # 纯读命令：list / search / info / installed（像 apt list/search/show）
     if args.action == "list":
         return run_setup(["list"])
-    if args.action == "doctor":
+    if args.action in ("doctor", "versions"):
         return run_setup(["doctor"])
-    if args.action == "versions":
-        return run_setup(["doctor"])
+    if args.action == "search":
+        kw = (args.items[0] if args.items else "").lower()
+        meta = setup_meta()
+        hits = [m for m in meta if kw in m["name"].lower() or kw in m["desc"].lower()
+                or kw in m["category"].lower()] if kw else meta
+        if not hits:
+            info("无匹配项：%s" % kw)
+            return 0
+        for m in hits:
+            mark = c("g", "已装") if m["installed"] else c("d", "未装")
+            print("  %s %-12s %-9s %s" % (mark, m["name"], c("d", m["category"]), m["desc"]))
+        return 0
+    if args.action == "info":
+        if not args.items:
+            err("用法：clenv env info <项目名>")
+            return 2
+        name = args.items[0]
+        m = next((x for x in setup_meta() if x["name"] == name), None)
+        if not m:
+            err("未知项：%s（用 clenv env search 查可用项）" % name)
+            return 2
+        ver = ""
+        path = shutil.which(m["cmd"])
+        print(c("bold", name) + "  (%s)" % m["category"])
+        print("  说明   : %s" % m["desc"])
+        print("  命令   : %s" % m["cmd"])
+        print("  状态   : %s" % (c("g", "已安装 @ " + path) if path else c("y", "未安装")))
+        print("  安装   : clenv env install %s" % name)
+        return 0
+    if args.action == "installed":
+        meta = [m for m in setup_meta() if m["installed"]]
+        ok("已安装 %d 项：" % len(meta))
+        for m in meta:
+            print("  %-12s %-9s %s" % (m["name"], c("d", m["category"]), m["desc"]))
+        return 0
+    # 写命令：install / remove / update / upgrade（像 apt install/remove/update）
     if args.action == "install":
         if not args.items:
-            err("请给出要安装的项目，如：clenv env install ffmpeg jq gh")
+            err("请给出要安装的项目，如：clenv env install ffmpeg jq gh（可加 @版本）")
             return 2
+        return run_setup(list(args.items))
+    if args.action == "remove":
+        if not args.items:
+            err("请给出要卸载的项目，如：clenv env remove ffmpeg")
+            return 2
+        return run_setup(["remove"] + list(args.items))
+    if args.action == "update":
+        return run_setup(["update"])
+    if args.action == "upgrade":
+        if not args.items:
+            err("请给出要升级的项目，如：clenv env upgrade yq")
+            return 2
+        # 升级=先卸再装（对下载类会取最新；系统包走包管理器）
+        run_setup(["remove"] + list(args.items))
         return run_setup(list(args.items))
     err("未知 env 子命令：%s" % args.action)
     return 2
@@ -308,8 +376,17 @@ def cmd_init(args):
     else:
         info("未接入任何 MCP 服务器（--mcp none）。")
 
+    # 4) Docker 模式（可选）
+    if args.docker:
+        scaffold_docker(target, name,
+                        base_image=args.docker_image or "ubuntu:24.04",
+                        envs=(args.docker_envs or ""))
+
     print()
     ok("项目初始化完成：%s" % target)
+    if args.docker:
+        print("  Docker 模式：在此目录执行  clenv docker build  构建镜像，")
+        print("              再用  ./cdev <命令>  或  clenv docker shell  进入挂载了本目录的容器。")
     print("  下一步：cd %s && 用 Claude Code 打开；/mcp 可查看已接入工具。" % target)
     return 0
 
@@ -327,6 +404,172 @@ def resolve_mcp_selection(spec):
         else:
             warn("忽略未知 MCP 名：%s（可选 %s 或 all/none）" % (raw, "/".join(n[6:] for n in MCP_NAMES)))
     return names
+
+
+# ================================================================== docker
+DEFAULT_REPO_URL = os.environ.get(
+    "CLENV_REPO_URL",
+    "https://github.com/CyberNova2333/claude-enviroment-for-local-development.git")
+
+
+def docker_cfg_path(project):
+    return os.path.join(project, ".clenv-docker.json")
+
+
+def load_docker_cfg(project):
+    p = docker_cfg_path(project)
+    if not os.path.isfile(p):
+        return None
+    return read_json(p, default={})
+
+
+def dockerfile_hash(project):
+    """Dockerfile 内容的 sha256，用于「改了就重建」。"""
+    import hashlib
+    p = os.path.join(project, "Dockerfile")
+    try:
+        with open(p, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def load_template(name, embedded=""):
+    p = os.path.join(repo_root(), "templates", name)
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:  # noqa: BLE001
+        return embedded
+
+
+def scaffold_docker(target, name, base_image, envs):
+    """生成 Dockerfile / .dockerignore / .clenv-docker.json / cdev 封装脚本。"""
+    envs = (envs or "").strip()
+    envs_run = ("RUN clenv env install %s || true" % envs) if envs \
+        else "# （未指定 --docker-envs，容器内只装了 clenv 本体，可事后 clenv env install）"
+    dockerfile = (load_template("Dockerfile.tmpl")
+                  .replace("__BASE_IMAGE__", base_image)
+                  .replace("__REPO_URL__", DEFAULT_REPO_URL)
+                  .replace("__ENVS_RUN__", envs_run))
+    with open(os.path.join(target, "Dockerfile"), "w", encoding="utf-8") as f:
+        f.write(dockerfile)
+    ok("写入 Dockerfile（base=%s，预装=%s）" % (base_image, envs or "无"))
+
+    di = load_template("dockerignore.tmpl", ".git\n.venv\nnode_modules\n__pycache__\n")
+    with open(os.path.join(target, ".dockerignore"), "w", encoding="utf-8") as f:
+        f.write(di)
+
+    image = "clenv-" + "".join(ch if ch.isalnum() else "-" for ch in name.lower()).strip("-")
+    cfg = {"image": image, "base_image": base_image, "envs": envs,
+           "dockerfile_hash": ""}  # 首次 build 时写入 hash
+    write_json(docker_cfg_path(target), cfg)
+    ok("写入 .clenv-docker.json（镜像名 %s）" % image)
+
+    # cdev 便捷封装：等价 clenv docker run -- "$@"
+    cdev = os.path.join(target, "cdev")
+    with open(cdev, "w", encoding="utf-8") as f:
+        f.write("#!/usr/bin/env bash\n"
+                "# 在挂载了本目录的 Docker 容器中执行命令（由 clenv init --docker 生成）。\n"
+                "exec clenv docker run -- \"$@\"\n")
+    os.chmod(cdev, 0o755)
+    ok("写入 cdev 封装脚本（用法：./cdev <命令>）")
+
+
+def ensure_docker():
+    """确保 docker 可用；缺失则尝试自动安装。返回 True/False。"""
+    if shutil.which("docker"):
+        return True
+    warn("未检测到 docker，尝试自动安装…")
+    run_setup(["docker"])
+    if shutil.which("docker"):
+        ok("docker 安装完成。")
+        return True
+    err("docker 自动安装未成功。请手动安装后重试：clenv env install docker")
+    return False
+
+
+def docker_daemon_ok():
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=20)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def docker_image_exists(image):
+    try:
+        r = subprocess.run(["docker", "images", "-q", image],
+                           capture_output=True, text=True, timeout=20)
+        return bool(r.stdout.strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def docker_build(project, cfg, force=False):
+    if not ensure_docker():
+        return 1
+    if not docker_daemon_ok():
+        err("docker 守护进程未运行或无权限访问（试试启动 Docker，或把当前用户加入 docker 组）。")
+        return 1
+    cur = dockerfile_hash(project)
+    if (not force) and cfg.get("dockerfile_hash") == cur and docker_image_exists(cfg["image"]):
+        info("镜像已是最新（Dockerfile 未变化），跳过构建。")
+        return 0
+    info("构建镜像 %s …" % cfg["image"])
+    rc = subprocess.call(["docker", "build", "-t", cfg["image"], project])
+    if rc == 0:
+        cfg["dockerfile_hash"] = cur
+        write_json(docker_cfg_path(project), cfg)
+        ok("镜像构建完成：%s" % cfg["image"])
+    else:
+        err("镜像构建失败（rc=%d）。" % rc)
+    return rc
+
+
+def cmd_docker(args):
+    project = os.path.abspath(args.project or ".")
+    cfg = load_docker_cfg(project)
+    if cfg is None:
+        err("当前目录没有 .clenv-docker.json。请先 clenv init --docker（在该项目目录）。")
+        return 2
+
+    if args.action == "status":
+        print(c("bold", "Docker 模式") + "  (%s)" % project)
+        print("  镜像名      : %s" % cfg["image"])
+        print("  基础镜像    : %s" % cfg.get("base_image", "?"))
+        print("  预装环境    : %s" % (cfg.get("envs") or "无"))
+        print("  docker 命令 : %s" % (c("g", "可用") if shutil.which("docker") else c("r", "未安装")))
+        if shutil.which("docker"):
+            print("  守护进程    : %s" % (c("g", "运行中") if docker_daemon_ok() else c("y", "未运行/无权限")))
+            print("  镜像已构建  : %s" % (c("g", "是") if docker_image_exists(cfg["image"]) else c("y", "否")))
+        changed = cfg.get("dockerfile_hash") != dockerfile_hash(project)
+        print("  Dockerfile  : %s" % (c("y", "已改动，下次 run 会重建") if changed else c("g", "与上次构建一致")))
+        return 0
+
+    if args.action == "build":
+        return docker_build(project, cfg, force=False)
+    if args.action == "rebuild":
+        return docker_build(project, cfg, force=True)
+
+    if args.action in ("run", "shell"):
+        # 需要时（镜像缺失或 Dockerfile 变化）先自动重建，以反映最新更改
+        rc = docker_build(project, cfg, force=False)
+        if rc != 0:
+            return rc
+        cmd = ["docker", "run", "--rm", "-v", "%s:/workspace" % project, "-w", "/workspace"]
+        if sys.stdin.isatty():
+            cmd.append("-it")
+        cmd.append(cfg["image"])
+        if args.action == "shell" or not args.cmdargs:
+            cmd.append("/bin/bash")
+        else:
+            cmd += list(args.cmdargs)
+        info("在容器中运行：%s" % " ".join(cmd[-3:]))
+        return subprocess.call(cmd)
+
+    err("未知 docker 子命令：%s" % args.action)
+    return 2
 
 
 # ==================================================================== mcp
@@ -483,9 +726,10 @@ def build_parser():
     p.add_argument("--version", action="version", version="clenv " + VERSION)
     sub = p.add_subparsers(dest="cmd")
 
-    pe = sub.add_parser("env", help="管理/安装开发环境")
-    pe.add_argument("action", choices=["list", "doctor", "versions", "install"])
-    pe.add_argument("items", nargs="*", help="install 时的项目名，如 ffmpeg jq gh")
+    pe = sub.add_parser("env", help="管理/安装开发环境（类 apt 用法）")
+    pe.add_argument("action", choices=["list", "search", "info", "installed", "doctor",
+                                        "versions", "install", "remove", "update", "upgrade"])
+    pe.add_argument("items", nargs="*", help="项目名（install/remove/upgrade 可多个，可加 @版本；search/info 取第一个）")
 
     pv = sub.add_parser("venv", help="创建/列出虚拟环境")
     pv.add_argument("action", choices=["create", "list"])
@@ -501,10 +745,21 @@ def build_parser():
     pi.add_argument("--permissions", choices=["safe", "standard", "loose"])
     pi.add_argument("--mcp", help="要接入的 MCP：all/none 或逗号分隔（lang,codec,reverse,codeplatform）")
     pi.add_argument("--force", action="store_true", help="覆盖已存在的指令文件")
+    pi.add_argument("--docker", action="store_true",
+                    help="启用 Docker 模式：生成 Dockerfile/cdev，环境在挂载本目录的容器中运行")
+    pi.add_argument("--docker-image", dest="docker_image",
+                    help="Docker 基础镜像（默认 ubuntu:24.04）")
+    pi.add_argument("--docker-envs", dest="docker_envs",
+                    help="容器内预装的环境（如 'lang codec' 或 'python jq gh'）")
 
     pm = sub.add_parser("mcp", help="管理项目 .mcp.json")
     pm.add_argument("action", choices=["list", "add", "remove"])
     pm.add_argument("names", nargs="*", help="add/remove 的服务器名")
+
+    pd = sub.add_parser("docker", help="Docker 模式：构建/进入挂载本目录的容器")
+    pd.add_argument("action", choices=["build", "rebuild", "run", "shell", "status"])
+    pd.add_argument("cmdargs", nargs="*", help="run 时在容器内执行的命令")
+    pd.add_argument("--project", help="项目目录（默认当前）")
 
     pc = sub.add_parser("config", help="管理 Claude Code / clenv 设置")
     pc.add_argument("action", choices=[
@@ -528,6 +783,7 @@ def main(argv=None):
     dispatch = {
         "env": cmd_env, "venv": cmd_venv, "init": cmd_init,
         "mcp": cmd_mcp, "config": cmd_config, "doctor": cmd_doctor,
+        "docker": cmd_docker,
     }
     try:
         return dispatch[args.cmd](args)

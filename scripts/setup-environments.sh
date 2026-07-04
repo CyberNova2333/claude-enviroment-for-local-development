@@ -169,6 +169,35 @@ install_ruby() {
   pkg_install ruby-full || pkg_install ruby
   has ruby && _mark_ok ruby || _mark_fail ruby
 }
+install_cpp() { # C/C++ 工具链：gcc/g++/make + cmake + gdb（调试）
+  ensure_build_toolchain
+  has cmake || pkg_install cmake || true
+  has gdb || pkg_install gdb || true
+  if has gcc && has g++; then
+    _mark_ok "cpp (gcc/g++/make$(has cmake && printf /cmake)$(has gdb && printf /gdb))"
+  else _mark_fail cpp; fi
+}
+install_clang() {
+  if has clang; then _mark_ok clang; return; fi
+  try_pkgs clang clang llvm
+  has clang && _mark_ok clang || _mark_fail clang
+}
+install_dotnet() { # C# / .NET SDK
+  if has dotnet; then _mark_ok dotnet; return; fi
+  try_pkgs dotnet dotnet-sdk-8.0 dotnet-sdk-9.0 dotnet-sdk dotnet-host
+  if ! has dotnet && fetch "https://dot.net/v1/dotnet-install.sh" "$OPT_DIR/dotnet-install.sh"; then
+    # 官方脚本装到 ~/.dotnet（可带 REQ_VER）
+    if [ -n "$REQ_VER" ]; then bash "$OPT_DIR/dotnet-install.sh" --version "$REQ_VER" --install-dir "$HOME/.dotnet" >/dev/null 2>&1
+    else bash "$OPT_DIR/dotnet-install.sh" --channel LTS --install-dir "$HOME/.dotnet" >/dev/null 2>&1; fi
+    [ -x "$HOME/.dotnet/dotnet" ] && { ln -sf "$HOME/.dotnet/dotnet" "$BIN_DIR/dotnet"; ensure_path "$HOME/.dotnet"; }
+  fi
+  has dotnet && _mark_ok "dotnet${REQ_VER:+ $REQ_VER}" || _mark_fail dotnet
+}
+install_php() {
+  if has php; then _mark_ok "php ($(php -v 2>/dev/null | head -n1 | awk '{print $2}'))"; return; fi
+  try_pkgs php php-cli php
+  has php && _mark_ok php || _mark_fail php
+}
 
 # ============================ codec：编解码工具 ============================
 install_ffmpeg()      { ensure_cmd ffmpeg ffmpeg && _mark_ok ffmpeg || _mark_fail ffmpeg; }
@@ -176,7 +205,21 @@ install_imagemagick() {
   if has convert || has magick; then _mark_ok imagemagick; return; fi
   pkg_install imagemagick; (has convert || has magick) && _mark_ok imagemagick || _mark_fail imagemagick
 }
-install_jq()   { ensure_cmd jq jq && _mark_ok jq || _mark_fail jq; }
+install_jq()   {
+  if has jq; then _mark_ok jq; return; fi
+  pkg_install jq
+  if ! has jq; then
+    # 源码编译兜底（autotools + 内置 oniguruma），产物拷进 BIN_DIR
+    pkg_install autoconf automake libtool make flex bison >/dev/null 2>&1 || true
+    build_from_source jq https://github.com/jqlang/jq.git bash -c '
+      git submodule update --init >/dev/null 2>&1 || true
+      autoreconf -fi >/dev/null 2>&1 || true
+      ./configure --with-oniguruma=builtin --disable-docs --prefix="$HOME/.local" >/dev/null 2>&1 &&
+      make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null 2>&1 &&
+      { cp ./.libs/jq "'"$BIN_DIR"'/jq" 2>/dev/null || cp ./jq "'"$BIN_DIR"'/jq" 2>/dev/null; }'
+  fi
+  has jq && _mark_ok jq || _mark_fail jq
+}
 install_yq()   {
   if [ -z "$REQ_VER" ] && has yq; then _mark_ok yq; return; fi
   # yq(mikefarah) 单文件二进制；REQ_VER 形如 4.44.3
@@ -283,7 +326,6 @@ install_binutils() { # 提供 objdump/nm/readelf/strings
   pkg_install binutils
   (has readelf && has objdump) && _mark_ok binutils || _mark_fail binutils
 }
-install_gdb()      { ensure_cmd gdb gdb && _mark_ok gdb || _mark_fail gdb; }
 install_checksec() {
   if has checksec; then _mark_ok checksec; return; fi
   if ! pkg_install checksec || ! has checksec; then
@@ -292,6 +334,29 @@ install_checksec() {
       && chmod +x "$BIN_DIR/checksec"
   fi
   has checksec && _mark_ok checksec || _mark_fail checksec
+}
+install_adb() { # Android 调试桥（安卓 APP 调试/取证）
+  if has adb; then _mark_ok adb; return; fi
+  try_pkgs adb android-tools-adb android-tools adb
+  has adb && _mark_ok adb || _mark_fail adb
+}
+
+# ============================ debug：调试工具 ===========================
+install_gdb()      { ensure_cmd gdb gdb && _mark_ok gdb || _mark_fail gdb; }
+install_lldb()     { if has lldb; then _mark_ok lldb; return; fi; try_pkgs lldb lldb llvm; has lldb && _mark_ok lldb || _mark_fail lldb; }
+install_valgrind() { ensure_cmd valgrind valgrind && _mark_ok valgrind || _mark_fail valgrind; }
+install_strace()   { ensure_cmd strace strace && _mark_ok strace || _mark_fail strace; }
+install_ltrace()   { ensure_cmd ltrace ltrace && _mark_ok ltrace || _mark_fail ltrace; }
+
+# ============================ container：容器 ==========================
+install_docker() {
+  if has docker; then _mark_ok "docker ($(docker --version 2>/dev/null | awk '{print $3}' | tr -d ,))"; return; fi
+  # 官方便捷脚本优先，失败回退发行版包
+  if fetch "https://get.docker.com" "$OPT_DIR/get-docker.sh"; then
+    $SUDO sh "$OPT_DIR/get-docker.sh" >/dev/null 2>&1 || true
+  fi
+  has docker || try_pkgs docker docker.io docker-ce docker
+  has docker && _mark_ok docker || _mark_fail docker
 }
 
 # ============================ devtools：开发辅助 =========================
@@ -342,12 +407,15 @@ install_glab() {
 }
 
 # ============================ 分类映射 =====================================
-LANG_ITEMS="python node go rust java ruby"
+LANG_ITEMS="python node go rust java ruby cpp clang dotnet php"
 CODEC_ITEMS="ffmpeg imagemagick jq yq pandoc 7z protobuf poppler xxd exiftool tesseract sqlite3 mediainfo file"
-REVERSE_ITEMS="apktool jadx dex2jar radare2 binwalk frida binutils gdb checksec"
+REVERSE_ITEMS="apktool jadx dex2jar radare2 binwalk frida binutils checksec adb"
+DEBUG_ITEMS="gdb lldb valgrind strace ltrace"
 VCS_ITEMS="git gh glab curl wget"
 DEVTOOLS_ITEMS="shellcheck ruff pytest"
-ALL_ITEMS="$LANG_ITEMS $CODEC_ITEMS $REVERSE_ITEMS $VCS_ITEMS $DEVTOOLS_ITEMS"
+CONTAINER_ITEMS="docker"
+# all 部署时遍历的分类（不含 container：docker 需守护进程，按需单独装）
+ALL_ITEMS="$LANG_ITEMS $CODEC_ITEMS $REVERSE_ITEMS $DEBUG_ITEMS $VCS_ITEMS $DEVTOOLS_ITEMS $CONTAINER_ITEMS"
 
 # 把单项名映射到安装函数。支持 name@version（仅 VERSIONED_ITEMS 内的项生效）。
 install_item() {
@@ -367,6 +435,10 @@ install_item() {
     rust|rustc)     install_rust;;
     java|jdk)       install_java;;
     ruby)           install_ruby;;
+    cpp|c|c++|gcc|g++) install_cpp;;
+    clang|llvm)     install_clang;;
+    dotnet|csharp|c#|dotnet-sdk) install_dotnet;;
+    php)            install_php;;
     ffmpeg)         install_ffmpeg;;
     imagemagick|convert) install_imagemagick;;
     jq)             install_jq;;
@@ -388,8 +460,14 @@ install_item() {
     binwalk)        install_binwalk;;
     frida)          install_frida;;
     binutils|objdump|nm|readelf|strings) install_binutils;;
-    gdb)            install_gdb;;
     checksec)       install_checksec;;
+    adb)            install_adb;;
+    gdb)            install_gdb;;
+    lldb)           install_lldb;;
+    valgrind)       install_valgrind;;
+    strace)         install_strace;;
+    ltrace)         install_ltrace;;
+    docker)         install_docker;;
     shellcheck)     install_shellcheck;;
     ruff)           install_ruff;;
     pytest)         install_pytest;;
@@ -408,8 +486,10 @@ install_category() {
     lang)    step "分类 lang（语言环境）";    for i in $LANG_ITEMS;    do install_item "$i"; done;;
     codec)   step "分类 codec（编解码工具）"; for i in $CODEC_ITEMS;   do install_item "$i"; done;;
     reverse) step "分类 reverse（逆向工具）"; for i in $REVERSE_ITEMS; do install_item "$i"; done;;
+    debug)   step "分类 debug（调试工具）"; for i in $DEBUG_ITEMS;   do install_item "$i"; done;;
     vcs)     step "分类 vcs（代码平台工具）"; for i in $VCS_ITEMS;     do install_item "$i"; done;;
     devtools) step "分类 devtools（开发辅助）"; for i in $DEVTOOLS_ITEMS; do install_item "$i"; done;;
+    container) step "分类 container（容器）"; for i in $CONTAINER_ITEMS; do install_item "$i"; done;;
     *) return 1;;
   esac
 }
@@ -418,16 +498,21 @@ install_category() {
 DOCTOR=(
   "python3|python3 -V" "node|node -v" "go|go version" "rustc|rustc --version"
   "java|java -version" "ruby|ruby -v"
+  "gcc|gcc --version" "g++|g++ --version" "clang|clang --version" "cmake|cmake --version"
+  "dotnet|dotnet --version" "php|php -v"
   "ffmpeg|ffmpeg -version" "convert|convert --version" "jq|jq --version" "yq|yq --version"
   "pandoc|pandoc -v" "7z|7z i" "protoc|protoc --version" "pdftotext|pdftotext -v" "xxd|xxd -v"
   "exiftool|exiftool -ver" "tesseract|tesseract --version" "sqlite3|sqlite3 --version"
   "mediainfo|mediainfo --version" "file|file --version"
   "apktool|apktool --version" "jadx|jadx --version" "d2j-dex2jar|d2j-dex2jar --version"
   "r2|r2 -v" "binwalk|binwalk --help" "frida|frida --version"
-  "readelf|readelf --version" "objdump|objdump --version" "nm|nm --version" "gdb|gdb --version"
-  "checksec|checksec --version"
+  "readelf|readelf --version" "objdump|objdump --version" "nm|nm --version"
+  "checksec|checksec --version" "adb|adb --version"
+  "gdb|gdb --version" "lldb|lldb --version" "valgrind|valgrind --version"
+  "strace|strace -V" "ltrace|ltrace --version"
   "git|git --version" "gh|gh --version" "glab|glab --version" "curl|curl --version" "wget|wget --version"
   "shellcheck|shellcheck --version" "ruff|ruff --version" "pytest|pytest --version"
+  "docker|docker --version"
 )
 do_doctor() {
   step "环境自检（doctor）"
@@ -444,11 +529,13 @@ do_doctor() {
 
 do_list() {
   printf '%b\n' "${C_BOLD}可安装分类与项目：${C_RESET}"
-  printf '  %-9s %s\n' "lang"     "$LANG_ITEMS"
-  printf '  %-9s %s\n' "codec"    "$CODEC_ITEMS"
-  printf '  %-9s %s\n' "reverse"  "$REVERSE_ITEMS"
-  printf '  %-9s %s\n' "vcs"      "$VCS_ITEMS"
-  printf '  %-9s %s\n' "devtools" "$DEVTOOLS_ITEMS"
+  printf '  %-10s %s\n' "lang"      "$LANG_ITEMS"
+  printf '  %-10s %s\n' "codec"     "$CODEC_ITEMS"
+  printf '  %-10s %s\n' "reverse"   "$REVERSE_ITEMS"
+  printf '  %-10s %s\n' "debug"     "$DEBUG_ITEMS"
+  printf '  %-10s %s\n' "vcs"       "$VCS_ITEMS"
+  printf '  %-10s %s\n' "devtools"  "$DEVTOOLS_ITEMS"
+  printf '  %-10s %s\n' "container" "$CONTAINER_ITEMS"
   echo
   printf '%b\n' "${C_BOLD}指定版本（name@version）${C_RESET}：支持精确版本的项 → ${C_DIM}$VERSIONED_ITEMS${C_RESET}"
   echo "  其余项 @version 会被忽略（仅能装系统包/仓库版本）。"
@@ -457,8 +544,107 @@ do_list() {
   echo "      setup-environments.sh go@1.21.0 node@20.11.1 yq@4.44.3"
 }
 
+# ---------------------- 元数据（供 clenv 的类 apt 能力使用）----------------
+# 项 -> 用于探测是否已安装的命令名
+item_cmd() {
+  case "$1" in
+    python) echo python3;; rust) echo rustc;; cpp) echo gcc;; imagemagick) echo convert;;
+    protobuf) echo protoc;; poppler) echo pdftotext;; dex2jar) echo d2j-dex2jar;;
+    radare2) echo r2;; binutils) echo readelf;;
+    *) echo "$1";;
+  esac
+}
+# 项 -> 所属分类
+item_category() {
+  case " $LANG_ITEMS "     in *" $1 "*) echo lang; return;; esac
+  case " $CODEC_ITEMS "    in *" $1 "*) echo codec; return;; esac
+  case " $REVERSE_ITEMS "  in *" $1 "*) echo reverse; return;; esac
+  case " $DEBUG_ITEMS "    in *" $1 "*) echo debug; return;; esac
+  case " $VCS_ITEMS "      in *" $1 "*) echo vcs; return;; esac
+  case " $DEVTOOLS_ITEMS " in *" $1 "*) echo devtools; return;; esac
+  case " $CONTAINER_ITEMS " in *" $1 "*) echo container; return;; esac
+  echo other
+}
+# 项 -> 一句话中文说明
+item_desc() {
+  case "$1" in
+    python) echo "Python 解释器 + venv + pip";; node) echo "Node.js + npm";;
+    go) echo "Go 语言工具链";; rust) echo "Rust + Cargo";; java) echo "OpenJDK";;
+    ruby) echo "Ruby 解释器";; cpp) echo "C/C++ 工具链 gcc/g++/make/cmake/gdb";;
+    clang) echo "LLVM/Clang 编译器";; dotnet) echo "C#/.NET SDK";; php) echo "PHP CLI";;
+    ffmpeg) echo "音视频转码/探查";; imagemagick) echo "图像转换/识别";;
+    jq) echo "JSON 处理器";; yq) echo "YAML/JSON 处理器";; pandoc) echo "文档格式互转";;
+    7z) echo "压缩包解列";; protobuf) echo "Protobuf 编译/解码";;
+    poppler) echo "PDF 工具集";; xxd) echo "十六进制查看";; exiftool) echo "元数据/取证";;
+    tesseract) echo "OCR 文字识别";; sqlite3) echo "SQLite 命令行";;
+    mediainfo) echo "媒体元数据";; file) echo "文件类型识别";;
+    apktool) echo "APK 反编译/回编译";; jadx) echo "Dex→Java 反编译";;
+    dex2jar) echo "Dex→Jar";; radare2) echo "逆向工程框架";; binwalk) echo "固件签名扫描";;
+    frida) echo "动态插桩工具";; binutils) echo "readelf/objdump/nm/strings";;
+    checksec) echo "二进制加固检查";; adb) echo "Android 调试桥";;
+    gdb) echo "GNU 调试器";; lldb) echo "LLVM 调试器";; valgrind) echo "内存检测";;
+    strace) echo "系统调用跟踪";; ltrace) echo "库调用跟踪";;
+    git) echo "版本控制";; gh) echo "GitHub CLI";; glab) echo "GitLab CLI";;
+    curl) echo "HTTP 客户端";; wget) echo "下载工具";;
+    shellcheck) echo "Shell 静态检查";; ruff) echo "Python 静态检查";;
+    pytest) echo "Python 测试框架";; docker) echo "容器引擎";;
+    *) echo "";;
+  esac
+}
+# 项 -> 系统包名（用于卸载；仅列出以系统包为主的项）
+item_syspkg() {
+  case "$1" in
+    ffmpeg) echo ffmpeg;; jq) echo jq;; pandoc) echo pandoc;; php) echo "php-cli php";;
+    clang) echo clang;; sqlite3) echo sqlite3;; mediainfo) echo mediainfo;; file) echo file;;
+    exiftool) echo "libimage-exiftool-perl exiftool";; tesseract) echo tesseract-ocr;;
+    radare2) echo radare2;; binwalk) echo binwalk;; binutils) echo binutils;;
+    gdb) echo gdb;; lldb) echo lldb;; valgrind) echo valgrind;; strace) echo strace;;
+    ltrace) echo ltrace;; adb) echo "android-tools-adb android-tools";;
+    git) echo git;; curl) echo curl;; wget) echo wget;; shellcheck) echo shellcheck;;
+    java) echo default-jdk;; ruby) echo "ruby-full ruby";; imagemagick) echo imagemagick;;
+    poppler) echo poppler-utils;; xxd) echo xxd;; protobuf) echo protobuf-compiler;;
+    *) echo "";;
+  esac
+}
+
+# meta：逐行输出「项|分类|命令|已装(1/0)|说明」，供 clenv 解析（search/info/installed）
+do_meta() {
+  local it cmd inst
+  for it in $ALL_ITEMS; do
+    cmd="$(item_cmd "$it")"
+    has "$cmd" && inst=1 || inst=0
+    printf '%s|%s|%s|%s|%s\n' "$it" "$(item_category "$it")" "$cmd" "$inst" "$(item_desc "$it")"
+  done
+}
+
+# remove：卸载项（先删本项目产物，再 pip 卸载，最后按需卸系统包）
+do_remove() {
+  detect_pkg_mgr || true
+  local it cmd pkg
+  for it in "$@"; do
+    cmd="$(item_cmd "$it")"
+    step "卸载 $it（$cmd）"
+    rm -f  "$BIN_DIR/$cmd" 2>/dev/null
+    rm -rf "$OPT_DIR/$it" "$OPT_DIR/$cmd" 2>/dev/null
+    case "$it" in
+      frida)  python3 -m pip uninstall -y frida-tools >/dev/null 2>&1 || true;;
+      ruff)   python3 -m pip uninstall -y ruff >/dev/null 2>&1 || true;;
+      pytest) python3 -m pip uninstall -y pytest >/dev/null 2>&1 || true;;
+    esac
+    if has "$cmd"; then
+      pkg="$(item_syspkg "$it")"
+      if [ -n "$pkg" ]; then pkg_remove "$pkg" >/dev/null 2>&1 || true; fi
+    fi
+    if has "$cmd"; then warn "$it 仍可用（可能为系统级安装，需用系统包管理器手动卸载）。"
+    else ok "$it 已卸载。"; fi
+  done
+}
+
+# update：刷新包索引（等价 apt update）
+do_update() { detect_pkg_mgr || return 1; _PKG_UPDATED=""; pkg_update_once && ok "已刷新包索引（$PKG_MGR）。"; }
+
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 summary() {
@@ -474,15 +660,21 @@ summary() {
 
 main() {
   [ $# -eq 0 ] && { usage; exit 0; }
+  # 命令式子命令（取全部剩余参数）：优先在此处理
+  case "$1" in
+    -h|--help) usage; exit 0;;
+    list)   do_list; exit 0;;
+    doctor) do_doctor; exit 0;;
+    meta)   do_meta; exit 0;;
+    update) do_update; exit 0;;
+    remove) shift; detect_pkg_mgr || true; do_remove "$@"; exit 0;;
+  esac
   detect_pkg_mgr || true
   local ran=0
   for arg in "$@"; do
     case "$arg" in
-      -h|--help) usage; exit 0;;
-      list)      do_list; exit 0;;
-      doctor)    do_doctor; exit 0;;
-      all)       ran=1; for c in lang codec reverse vcs devtools; do install_category "$c"; done;;
-      lang|codec|reverse|vcs|devtools) ran=1; install_category "$arg";;
+      all)       ran=1; for c in lang codec reverse debug vcs devtools; do install_category "$c"; done;;
+      lang|codec|reverse|debug|vcs|devtools|container) ran=1; install_category "$arg";;
       *) ran=1; install_item "$arg";;
     esac
   done
