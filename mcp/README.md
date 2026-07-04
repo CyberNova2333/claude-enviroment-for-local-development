@@ -8,19 +8,24 @@
 
 - **零第三方依赖**：全部用系统自带的 `python3` 实现 MCP 的 stdio + JSON-RPC 2.0
   协议（见 `servers/mcpbase.py`），无需 `pip install` 任何东西即可运行。
-- **未安装即引导**：底层命令若不在 `PATH`，工具会返回明确的安装指引
-  （`setup-environments.sh <项目>` 或 `clenv env install <项目>`），不会静默失败。
-- **写操作显式化**：涉及「留下痕迹」的动作（`git push`、非 GET 的 API 调用等）
-  一律需要显式 `allow_write=true`，避免 Agent 误触。
+- **专为「让模型正确调用」设计**（v2）：
+  - 每个工具带**结构化调用示例**（自动拼进 description，模型能看到具体入参 JSON）；
+  - 每个工具带**标注** `annotations`（`readOnlyHint`/`destructiveHint`/`openWorldHint`/
+    `title`），客户端据此判断只读/危险/是否访问网络；
+  - inputSchema 为每个字段写了 `description`/`default`/`enum`，减少模型猜参数。
+- **健壮性**（v2）：调用前按 `required` 校验必填参数并给出清晰错误；输入路径不存在提前拦截；
+  命令未安装返回精准安装指引；输出超长自动截断；超时可控；单条消息异常不致服务器崩溃。
+- **写操作显式化**：涉及「留下痕迹」的动作（`git push`/`git commit`、非 GET API、
+  SQLite 写语句等）一律需要显式 `allow_write=true`。
 
-## 四个服务器
+## 四个服务器（共 61 个工具）
 
-| 服务器 | 文件 | 覆盖工具 | 详细文档 |
-|---|---|---|---|
-| `clenv-lang` | `servers/lang_mcp.py` | python/venv/pip、node/npm、go、cargo、版本汇总 | [docs/lang.md](docs/lang.md) |
-| `clenv-codec` | `servers/codec_mcp.py` | ffmpeg、ImageMagick、jq、yq、pandoc、7z、protoc、poppler、xxd | [docs/codec.md](docs/codec.md) |
-| `clenv-reverse` | `servers/reverse_mcp.py` | apktool、jadx、dex2jar、radare2、binwalk、frida | [docs/reverse.md](docs/reverse.md) |
-| `clenv-codeplatform` | `servers/codeplatform_mcp.py` | git、gh、glab、curl | [docs/codeplatform.md](docs/codeplatform.md) |
+| 服务器 | 文件 | 工具数 | 覆盖工具 | 详细文档 |
+|---|---|:--:|---|---|
+| `clenv-lang` | `servers/lang_mcp.py` | 13 | 内联执行、python/venv/pip/pytest/ruff、node/npm、go、cargo、版本汇总 | [docs/lang.md](docs/lang.md) |
+| `clenv-codec` | `servers/codec_mcp.py` | 20 | ffmpeg、mediainfo、ImageMagick、tesseract、jq、yq、sqlite3、pandoc、7z、file、strings、xxd、protoc、base64、哈希、poppler、exiftool | [docs/codec.md](docs/codec.md) |
+| `clenv-reverse` | `servers/reverse_mcp.py` | 13 | apktool、jadx、dex2jar、radare2、readelf/objdump/nm、checksec、gdb、binwalk、frida | [docs/reverse.md](docs/reverse.md) |
+| `clenv-codeplatform` | `servers/codeplatform_mcp.py` | 15 | git（状态/历史/diff/show/blame/grep/分支/克隆/提交/推送）、gh、glab、curl | [docs/codeplatform.md](docs/codeplatform.md) |
 
 ## 接入 Claude Code
 
