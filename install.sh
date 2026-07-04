@@ -19,10 +19,16 @@
 #   --api <url>           配置 Claude Code 全局 API 地址（ANTHROPIC_BASE_URL）
 #   --model <name>        配置 Claude Code 全局默认模型（ANTHROPIC_MODEL）
 #   --token <token>       配置 Claude Code 全局令牌（ANTHROPIC_AUTH_TOKEN，明文写入用户级设置）
+#   --silent, -s          静默：不做任何交互式询问（适合 curl|bash / CI），也不自动刷新 shell
+#   --no-refresh          配置完成后不自动刷新（不 exec 新的登录 shell）
 #   -h, --help
 #
-# 默认行为：安装 clenv 后会自动检测 Claude Code 是否已安装；未安装则安装其前置环境
-# （Node/curl）并安装 Claude Code。若给了 --api/--model/--token，则写入全局设置。
+# 默认行为：安装 clenv 后自动检测 Claude Code 是否已安装；未安装则装前置环境（Node/curl）
+# 并安装 Claude Code。随后：
+#   * 若给了 --api/--model/--token → 直接写入全局设置（非交互）；
+#   * 否则在**交互式终端**下询问「是否现在配置 API 地址/模型」，选是则逐项交互录入并写入，
+#     完成后自动刷新 shell（exec 登录 shell）使 PATH 与配置立即生效；
+#   * --silent 则完全跳过上述询问与刷新。
 set -uo pipefail
 
 REPO_URL="${CLENV_REPO_URL:-https://github.com/CyberNova2333/claude-enviroment-for-local-development.git}"
@@ -30,6 +36,8 @@ PREFIX="${CLENV_BIN_DIR:-$HOME/.local/bin}"
 DO_COPY=0
 DO_PATH=1
 DO_CLAUDE=1
+SILENT=0
+DO_REFRESH=1
 OPT_API=""
 OPT_MODEL=""
 OPT_TOKEN=""
@@ -46,7 +54,9 @@ while [ $# -gt 0 ]; do
     --api)    OPT_API="$2"; shift 2;;
     --model)  OPT_MODEL="$2"; shift 2;;
     --token)  OPT_TOKEN="$2"; shift 2;;
-    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --silent|-s) SILENT=1; shift;;
+    --no-refresh) DO_REFRESH=0; shift;;
+    -h|--help) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "未知选项：$1"; exit 2;;
   esac
 done
@@ -56,6 +66,16 @@ ok()   { printf '\033[32m[✓]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[✗]\033[0m %s\n' "$*" >&2; exit 1; }
 has()  { command -v "$1" >/dev/null 2>&1; }
+
+# 是否处于可交互终端（curl|bash 时 stdin 是管道，但仍可能有 /dev/tty）
+is_tty() { [ -t 0 ] && return 0; [ -t 1 ] && [ -r /dev/tty ] && return 0; return 1; }
+# 交互读取一行：优先从 /dev/tty 读，回退 stdin。用法：ask <变量名> [secret]
+ask() {
+  local __src=/dev/stdin __val=""
+  [ -r /dev/tty ] && __src=/dev/tty
+  if [ "${2:-}" = "secret" ]; then read -rs __val < "$__src"; echo; else read -r __val < "$__src"; fi
+  printf -v "$1" '%s' "$__val"
+}
 
 # 需要提权时用（root 则为空）
 if [ "$(id -u)" -eq 0 ]; then SUDO=""; elif has sudo; then SUDO="sudo"; else SUDO=""; fi
@@ -200,16 +220,47 @@ else
 fi
 
 # ---- 配置 Claude Code 全局环境变量（API 地址/模型/令牌）----
+NEED_REFRESH=0
 configure_claude_env() {
   local cli="$PREFIX/clenv"
   has "$cli" || cli="clenv"
   [ -n "$OPT_API" ]   && "$cli" config api   "$OPT_API"   --global
   [ -n "$OPT_MODEL" ] && "$cli" config model "$OPT_MODEL" --global
   [ -n "$OPT_TOKEN" ] && "$cli" config token "$OPT_TOKEN" --global
+  # 同时导出到本进程环境，供随后 exec 的登录 shell 继承，立即生效
+  [ -n "$OPT_API" ]   && export ANTHROPIC_BASE_URL="$OPT_API"
+  [ -n "$OPT_MODEL" ] && export ANTHROPIC_MODEL="$OPT_MODEL"
+  [ -n "$OPT_TOKEN" ] && export ANTHROPIC_AUTH_TOKEN="$OPT_TOKEN"
 }
+
+# 交互式询问是否配置，并逐项录入
+prompt_configure_claude() {
+  local ans v
+  printf '\033[34m[?]\033[0m 是否现在配置 Claude Code 的 API 地址 / 模型等全局设置？[y/N] '
+  ask ans
+  case "$ans" in
+    y|Y|yes|YES|是) ;;
+    *) say "跳过 Claude Code 配置（以后可随时 clenv config api <url> --global）。"; return 0;;
+  esac
+  printf '  第三方 API 地址（ANTHROPIC_BASE_URL，回车跳过）: '; ask v; [ -n "$v" ] && OPT_API="$v"
+  printf '  默认模型名（ANTHROPIC_MODEL，回车跳过）: ';           ask v; [ -n "$v" ] && OPT_MODEL="$v"
+  printf '  令牌（ANTHROPIC_AUTH_TOKEN，回车跳过；输入不回显）: '; ask v secret; [ -n "$v" ] && OPT_TOKEN="$v"
+  if [ -z "$OPT_API$OPT_MODEL$OPT_TOKEN" ]; then
+    say "未输入任何值，跳过配置。"; return 0
+  fi
+  say "写入全局设置（~/.claude/settings.json 的 env）…"
+  configure_claude_env
+  NEED_REFRESH=1
+}
+
 if [ -n "$OPT_API$OPT_MODEL$OPT_TOKEN" ]; then
+  # 命令行已给出 → 非交互直接写入
   say "配置 Claude Code 全局设置（写入 ~/.claude/settings.json 的 env）…"
   configure_claude_env
+elif [ "$SILENT" -eq 1 ]; then
+  : # 静默：不询问
+elif is_tty; then
+  prompt_configure_claude
 elif [ "$DO_CLAUDE" -eq 1 ] && has claude; then
   say "如需配置第三方 API/模型：clenv config api <url> --global；clenv config model <name> --global"
 fi
@@ -226,4 +277,13 @@ echo "  验证：  clenv doctor"
 has claude && echo "  Claude Code：$(claude --version 2>/dev/null || echo 已安装)（配置：clenv config api <url> --global）"
 echo "  装环境：clenv env install ffmpeg jq gh   或   setup-environments.sh lang codec"
 echo "  初始化项目：clenv init my-project --permissions standard --mcp all"
+
+# ---- 自动刷新 shell：让新配置与 PATH 立即生效 ----
+# 仅在「交互配置过、允许刷新、非静默、且处于交互终端」时，用登录 shell 替换当前进程。
+if [ "$NEED_REFRESH" -eq 1 ] && [ "$DO_REFRESH" -eq 1 ] && [ "$SILENT" -eq 0 ] && is_tty; then
+  echo
+  ok "配置完成，正在刷新 shell 使 PATH 与 API/模型设置立即生效…"
+  # 已 export 的 ANTHROPIC_* 会被下面 exec 的登录 shell 继承；-l 让其重读 profile 拿到新 PATH
+  exec "${SHELL:-bash}" -l
+fi
 [ "$DO_PATH" -eq 1 ] && case ":$PATH:" in *":$PREFIX:"*) : ;; *) echo "  （先执行： export PATH=\"$PREFIX:\$PATH\"  使本终端立即生效）";; esac
