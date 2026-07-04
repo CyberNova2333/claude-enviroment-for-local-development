@@ -48,14 +48,15 @@ clenv doctor
 
 ## 1) 环境部署脚本 `setup-environments.sh`
 
-四大分类，共 25 个可安装项：
+五大分类，共 36 个可安装项：
 
 | 分类 | 项目 |
 |---|---|
 | `lang`（语言，无头） | python、node、go、rust、java、ruby |
-| `codec`（文件编解码） | ffmpeg、imagemagick、jq、yq、pandoc、7z、protobuf、poppler、xxd |
-| `reverse`（逆向工具） | apktool、jadx、dex2jar、radare2、binwalk、frida |
+| `codec`（文件编解码/取证） | ffmpeg、imagemagick、jq、yq、pandoc、7z、protobuf、poppler、xxd、exiftool、tesseract、sqlite3、mediainfo、file |
+| `reverse`（逆向/静态分析） | apktool、jadx、dex2jar、radare2、binwalk、frida、binutils、gdb、checksec |
 | `vcs`（代码平台） | git、gh(GitHub CLI)、glab(GitLab CLI)、curl、wget |
+| `devtools`（开发辅助） | shellcheck、ruff、pytest |
 
 ```bash
 setup-environments.sh list                 # 列出全部分类与项目
@@ -72,15 +73,17 @@ setup-environments.sh all                  # 全部（较重）
 
 ## 2) MCP 工具集
 
-四个 MCP 服务器把上面的工具封装为结构化工具，让 Agent 以「工具调用」而非「拼 bash」的
-方式使用，更稳、更省 token。详见 [`mcp/README.md`](mcp/README.md)。
+四个 MCP 服务器（共 **61 个工具**）把上面的工具封装为结构化工具，让 Agent 以「工具调用」
+而非「拼 bash」的方式使用，更稳、更省 token。每个工具都带**结构化调用示例**与
+**只读/危险标注**（`annotations`），并在调用前校验必填参数、拦截不存在的路径、对未安装命令
+给出安装指引——显著降低模型调用出错率。详见 [`mcp/README.md`](mcp/README.md)。
 
-| 服务器 | 覆盖 | 文档 |
-|---|---|---|
-| `clenv-lang` | python/venv/pip、node/npm、go、cargo、版本汇总 | [mcp/docs/lang.md](mcp/docs/lang.md) |
-| `clenv-codec` | ffmpeg、ImageMagick、jq、yq、pandoc、7z、protoc、poppler、xxd | [mcp/docs/codec.md](mcp/docs/codec.md) |
-| `clenv-reverse` | apktool、jadx、dex2jar、radare2、binwalk、frida | [mcp/docs/reverse.md](mcp/docs/reverse.md) |
-| `clenv-codeplatform` | git、gh、glab、curl | [mcp/docs/codeplatform.md](mcp/docs/codeplatform.md) |
+| 服务器 | 工具数 | 覆盖 | 文档 |
+|---|:--:|---|---|
+| `clenv-lang` | 13 | 内联执行、python/venv/pip/pytest/ruff、node/npm、go、cargo | [mcp/docs/lang.md](mcp/docs/lang.md) |
+| `clenv-codec` | 20 | ffmpeg、mediainfo、ImageMagick、tesseract、jq、yq、sqlite3、pandoc、7z、file、strings、xxd、protoc、base64、哈希、poppler、exiftool | [mcp/docs/codec.md](mcp/docs/codec.md) |
+| `clenv-reverse` | 13 | apktool、jadx、dex2jar、radare2、readelf/objdump/nm、checksec、gdb、binwalk、frida | [mcp/docs/reverse.md](mcp/docs/reverse.md) |
+| `clenv-codeplatform` | 15 | git（状态/历史/diff/show/blame/grep/分支/克隆/提交/推送）、gh、glab、curl | [mcp/docs/codeplatform.md](mcp/docs/codeplatform.md) |
 
 接入当前项目：`clenv mcp add all`（或 `clenv init` 时用 `--mcp` 勾选），在 Claude Code
 里执行 `/mcp` 即可看到 `clenv-*` 服务器。

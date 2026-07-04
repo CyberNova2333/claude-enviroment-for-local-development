@@ -34,11 +34,27 @@ DONE=()     # 收集成功/已存在项
 _mark_ok()   { DONE+=("$1"); }
 _mark_fail() { FAILED+=("$1"); }
 
-# 下载助手：curl 优先，回退 wget
+# 下载助手：curl 优先，回退 wget；网络失败按 2/4/8s 退避重试至多 3 次（健壮性）。
 fetch() { # fetch <url> <dest>
-  if has curl; then curl -fsSL "$1" -o "$2"
-  elif has wget; then wget -qO "$2" "$1"
-  else err "缺少 curl/wget，无法下载 $1"; return 1; fi
+  local url="$1" dst="$2" n=0
+  while :; do
+    if has curl; then curl -fsSL --connect-timeout 15 "$url" -o "$dst" && return 0
+    elif has wget; then wget -q --timeout=20 -O "$dst" "$url" && return 0
+    else err "缺少 curl/wget，无法下载 $url"; return 1; fi
+    n=$((n+1)); [ "$n" -ge 3 ] && { warn "下载失败（重试 $n 次）：$url"; return 1; }
+    sleep $((2**n))
+  done
+}
+
+# 尝试用多个候选系统包名安装同一能力（不同发行版包名各异），装到某个成功即止。
+try_pkgs() { # try_pkgs <探测命令> <候选包名...>
+  local probe="$1"; shift
+  has "$probe" && return 0
+  local p
+  for p in "$@"; do
+    pkg_install "$p" >/dev/null 2>&1 && has "$probe" && return 0
+  done
+  has "$probe"
 }
 
 # 生成一个把某 jar 包装成命令的 wrapper 脚本
@@ -151,6 +167,21 @@ install_xxd() {
   pkg_install xxd || pkg_install vim-common || pkg_install vim
   has xxd && _mark_ok xxd || _mark_fail xxd
 }
+install_exiftool() {
+  try_pkgs exiftool libimage-exiftool-perl perl-Image-ExifTool exiftool
+  has exiftool && _mark_ok exiftool || _mark_fail exiftool
+}
+install_tesseract() {
+  if has tesseract; then _mark_ok tesseract; return; fi
+  try_pkgs tesseract tesseract-ocr tesseract
+  # 附带常用语言包（失败不影响主体）
+  pkg_install tesseract-ocr-eng >/dev/null 2>&1 || true
+  pkg_install tesseract-ocr-chi-sim >/dev/null 2>&1 || true
+  has tesseract && _mark_ok tesseract || _mark_fail tesseract
+}
+install_sqlite()    { ensure_cmd sqlite3 sqlite3 && _mark_ok sqlite3 || _mark_fail sqlite3; }
+install_mediainfo() { ensure_cmd mediainfo mediainfo && _mark_ok mediainfo || _mark_fail mediainfo; }
+install_file()      { ensure_cmd file file && _mark_ok file || _mark_fail file; }
 
 # ============================ reverse：逆向工具 ============================
 install_apktool() {
@@ -207,6 +238,36 @@ install_frida() {
   python3 -m pip install --user frida-tools >/dev/null 2>&1
   has frida && _mark_ok "frida-tools" || _mark_fail frida
 }
+install_binutils() { # 提供 objdump/nm/readelf/strings
+  if has readelf && has objdump && has strings; then _mark_ok binutils; return; fi
+  pkg_install binutils
+  (has readelf && has objdump) && _mark_ok binutils || _mark_fail binutils
+}
+install_gdb()      { ensure_cmd gdb gdb && _mark_ok gdb || _mark_fail gdb; }
+install_checksec() {
+  if has checksec; then _mark_ok checksec; return; fi
+  if ! pkg_install checksec || ! has checksec; then
+    # 官方单文件脚本兜底
+    fetch "https://raw.githubusercontent.com/slimm609/checksec.sh/main/checksec" "$BIN_DIR/checksec" \
+      && chmod +x "$BIN_DIR/checksec"
+  fi
+  has checksec && _mark_ok checksec || _mark_fail checksec
+}
+
+# ============================ devtools：开发辅助 =========================
+install_shellcheck() { ensure_cmd shellcheck shellcheck && _mark_ok shellcheck || _mark_fail shellcheck; }
+install_ruff() {
+  if has ruff; then _mark_ok ruff; return; fi
+  has python3 || install_python
+  python3 -m pip install --user ruff >/dev/null 2>&1
+  has ruff && _mark_ok ruff || _mark_fail ruff
+}
+install_pytest() {
+  if has pytest; then _mark_ok pytest; return; fi
+  has python3 || install_python
+  python3 -m pip install --user pytest >/dev/null 2>&1
+  has pytest && _mark_ok pytest || _mark_fail pytest
+}
 
 # ============================ vcs：代码平台工具 ============================
 install_git()  { ensure_cmd git git && _mark_ok git || _mark_fail git; }
@@ -242,10 +303,11 @@ install_glab() {
 
 # ============================ 分类映射 =====================================
 LANG_ITEMS="python node go rust java ruby"
-CODEC_ITEMS="ffmpeg imagemagick jq yq pandoc 7z protobuf poppler xxd"
-REVERSE_ITEMS="apktool jadx dex2jar radare2 binwalk frida"
+CODEC_ITEMS="ffmpeg imagemagick jq yq pandoc 7z protobuf poppler xxd exiftool tesseract sqlite3 mediainfo file"
+REVERSE_ITEMS="apktool jadx dex2jar radare2 binwalk frida binutils gdb checksec"
 VCS_ITEMS="git gh glab curl wget"
-ALL_ITEMS="$LANG_ITEMS $CODEC_ITEMS $REVERSE_ITEMS $VCS_ITEMS"
+DEVTOOLS_ITEMS="shellcheck ruff pytest"
+ALL_ITEMS="$LANG_ITEMS $CODEC_ITEMS $REVERSE_ITEMS $VCS_ITEMS $DEVTOOLS_ITEMS"
 
 # 把单项名映射到安装函数
 install_item() {
@@ -265,12 +327,23 @@ install_item() {
     protobuf|protoc) install_protobuf;;
     poppler|pdftotext) install_poppler;;
     xxd)            install_xxd;;
+    exiftool|exif)  install_exiftool;;
+    tesseract|ocr)  install_tesseract;;
+    sqlite3|sqlite) install_sqlite;;
+    mediainfo)      install_mediainfo;;
+    file)           install_file;;
     apktool)        install_apktool;;
     jadx)           install_jadx;;
     dex2jar)        install_dex2jar;;
     radare2|r2)     install_radare2;;
     binwalk)        install_binwalk;;
     frida)          install_frida;;
+    binutils|objdump|nm|readelf|strings) install_binutils;;
+    gdb)            install_gdb;;
+    checksec)       install_checksec;;
+    shellcheck)     install_shellcheck;;
+    ruff)           install_ruff;;
+    pytest)         install_pytest;;
     git)            install_git;;
     gh|github)      install_gh;;
     glab|gitlab)    install_glab;;
@@ -286,6 +359,7 @@ install_category() {
     codec)   step "分类 codec（编解码工具）"; for i in $CODEC_ITEMS;   do install_item "$i"; done;;
     reverse) step "分类 reverse（逆向工具）"; for i in $REVERSE_ITEMS; do install_item "$i"; done;;
     vcs)     step "分类 vcs（代码平台工具）"; for i in $VCS_ITEMS;     do install_item "$i"; done;;
+    devtools) step "分类 devtools（开发辅助）"; for i in $DEVTOOLS_ITEMS; do install_item "$i"; done;;
     *) return 1;;
   esac
 }
@@ -296,9 +370,14 @@ DOCTOR=(
   "java|java -version" "ruby|ruby -v"
   "ffmpeg|ffmpeg -version" "convert|convert --version" "jq|jq --version" "yq|yq --version"
   "pandoc|pandoc -v" "7z|7z i" "protoc|protoc --version" "pdftotext|pdftotext -v" "xxd|xxd -v"
+  "exiftool|exiftool -ver" "tesseract|tesseract --version" "sqlite3|sqlite3 --version"
+  "mediainfo|mediainfo --version" "file|file --version"
   "apktool|apktool --version" "jadx|jadx --version" "d2j-dex2jar|d2j-dex2jar --version"
   "r2|r2 -v" "binwalk|binwalk --help" "frida|frida --version"
+  "readelf|readelf --version" "objdump|objdump --version" "nm|nm --version" "gdb|gdb --version"
+  "checksec|checksec --version"
   "git|git --version" "gh|gh --version" "glab|glab --version" "curl|curl --version" "wget|wget --version"
+  "shellcheck|shellcheck --version" "ruff|ruff --version" "pytest|pytest --version"
 )
 do_doctor() {
   step "环境自检（doctor）"
@@ -315,10 +394,11 @@ do_doctor() {
 
 do_list() {
   printf '%b\n' "${C_BOLD}可安装分类与项目：${C_RESET}"
-  printf '  %-9s %s\n' "lang"    "$LANG_ITEMS"
-  printf '  %-9s %s\n' "codec"   "$CODEC_ITEMS"
-  printf '  %-9s %s\n' "reverse" "$REVERSE_ITEMS"
-  printf '  %-9s %s\n' "vcs"     "$VCS_ITEMS"
+  printf '  %-9s %s\n' "lang"     "$LANG_ITEMS"
+  printf '  %-9s %s\n' "codec"    "$CODEC_ITEMS"
+  printf '  %-9s %s\n' "reverse"  "$REVERSE_ITEMS"
+  printf '  %-9s %s\n' "vcs"      "$VCS_ITEMS"
+  printf '  %-9s %s\n' "devtools" "$DEVTOOLS_ITEMS"
   echo
   echo "示例：setup-environments.sh lang codec   或   setup-environments.sh python ffmpeg gh"
 }
@@ -347,8 +427,8 @@ main() {
       -h|--help) usage; exit 0;;
       list)      do_list; exit 0;;
       doctor)    do_doctor; exit 0;;
-      all)       ran=1; for c in lang codec reverse vcs; do install_category "$c"; done;;
-      lang|codec|reverse|vcs) ran=1; install_category "$arg";;
+      all)       ran=1; for c in lang codec reverse vcs devtools; do install_category "$c"; done;;
+      lang|codec|reverse|vcs|devtools) ran=1; install_category "$arg";;
       *) ran=1; install_item "$arg";;
     esac
   done
