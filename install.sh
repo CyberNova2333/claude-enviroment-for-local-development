@@ -15,13 +15,24 @@
 #   --prefix <dir>        命令软链目录（默认 ~/.local/bin）
 #   --copy                复制而非软链 clenv（脱离仓库也能跑；默认软链，便于随仓库更新）
 #   --no-path             不改动 shell rc 的 PATH
+#   --no-claude           跳过「检测并自动安装 Claude Code」这一步
+#   --api <url>           配置 Claude Code 全局 API 地址（ANTHROPIC_BASE_URL）
+#   --model <name>        配置 Claude Code 全局默认模型（ANTHROPIC_MODEL）
+#   --token <token>       配置 Claude Code 全局令牌（ANTHROPIC_AUTH_TOKEN，明文写入用户级设置）
 #   -h, --help
+#
+# 默认行为：安装 clenv 后会自动检测 Claude Code 是否已安装；未安装则安装其前置环境
+# （Node/curl）并安装 Claude Code。若给了 --api/--model/--token，则写入全局设置。
 set -uo pipefail
 
 REPO_URL="${CLENV_REPO_URL:-https://github.com/CyberNova2333/claude-enviroment-for-local-development.git}"
 PREFIX="${CLENV_BIN_DIR:-$HOME/.local/bin}"
 DO_COPY=0
 DO_PATH=1
+DO_CLAUDE=1
+OPT_API=""
+OPT_MODEL=""
+OPT_TOKEN=""
 ENVS=()
 
 # ---- 解析参数 ----
@@ -31,7 +42,11 @@ while [ $# -gt 0 ]; do
     --prefix) PREFIX="$2"; shift 2;;
     --copy)   DO_COPY=1; shift;;
     --no-path) DO_PATH=0; shift;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --no-claude) DO_CLAUDE=0; shift;;
+    --api)    OPT_API="$2"; shift 2;;
+    --model)  OPT_MODEL="$2"; shift 2;;
+    --token)  OPT_TOKEN="$2"; shift 2;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "未知选项：$1"; exit 2;;
   esac
 done
@@ -40,6 +55,10 @@ say()  { printf '\033[34m[*]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m[✓]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[✗]\033[0m %s\n' "$*" >&2; exit 1; }
+has()  { command -v "$1" >/dev/null 2>&1; }
+
+# 需要提权时用（root 则为空）
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; elif has sudo; then SUDO="sudo"; else SUDO=""; fi
 
 # ---- 定位仓库根 ----
 # 若脚本随仓库存在（BASH_SOURCE 指向真实文件且旁边有 bin/clenv），直接用；
@@ -125,6 +144,76 @@ if [ "$DO_PATH" -eq 1 ]; then
   esac
 fi
 
+# ---- 检测并安装 Claude Code ----
+# 把 Claude Code 常见安装目录加入本会话 PATH，便于安装后立即探测到。
+refresh_claude_path() {
+  local d
+  for d in "$HOME/.local/bin" "$HOME/.claude/local" "$HOME/.claude/bin" "$HOME/bin"; do
+    [ -d "$d" ] || continue
+    case ":$PATH:" in *":$d:"*) : ;; *) PATH="$d:$PATH";; esac
+  done
+  export PATH
+}
+
+install_claude_code() {
+  say "未检测到 Claude Code，开始安装前置环境与 Claude Code…"
+  # 前置：curl（原生安装脚本需要）
+  has curl || bash "$REPO_ROOT/scripts/setup-environments.sh" curl >/dev/null 2>&1 || true
+
+  # 方式 1：官方原生安装脚本（自带二进制，无需 Node）
+  if has curl; then
+    say "尝试官方原生安装：curl -fsSL https://claude.ai/install.sh | bash"
+    curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash >/dev/null 2>&1 || true
+    refresh_claude_path
+  fi
+
+  # 方式 2：npm 全局安装（回退，需 Node.js）
+  if ! has claude; then
+    warn "原生安装未成功或不可用，回退到 npm 方式（需 Node.js）…"
+    has node || bash "$REPO_ROOT/scripts/setup-environments.sh" node >/dev/null 2>&1 || true
+    refresh_claude_path
+    if has npm; then
+      say "npm install -g @anthropic-ai/claude-code"
+      npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 \
+        || $SUDO npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
+      refresh_claude_path
+    fi
+  fi
+
+  if has claude; then
+    ok "Claude Code 安装完成：$(claude --version 2>/dev/null || echo '已安装')"
+  else
+    warn "Claude Code 自动安装未成功（可能网络受限）。可稍后手动安装："
+    warn "  curl -fsSL https://claude.ai/install.sh | bash   或   npm install -g @anthropic-ai/claude-code"
+  fi
+}
+
+if [ "$DO_CLAUDE" -eq 1 ]; then
+  refresh_claude_path
+  if has claude; then
+    ok "已检测到 Claude Code：$(claude --version 2>/dev/null || echo '已安装')"
+  else
+    install_claude_code
+  fi
+else
+  say "按 --no-claude，跳过 Claude Code 检测/安装。"
+fi
+
+# ---- 配置 Claude Code 全局环境变量（API 地址/模型/令牌）----
+configure_claude_env() {
+  local cli="$PREFIX/clenv"
+  has "$cli" || cli="clenv"
+  [ -n "$OPT_API" ]   && "$cli" config api   "$OPT_API"   --global
+  [ -n "$OPT_MODEL" ] && "$cli" config model "$OPT_MODEL" --global
+  [ -n "$OPT_TOKEN" ] && "$cli" config token "$OPT_TOKEN" --global
+}
+if [ -n "$OPT_API$OPT_MODEL$OPT_TOKEN" ]; then
+  say "配置 Claude Code 全局设置（写入 ~/.claude/settings.json 的 env）…"
+  configure_claude_env
+elif [ "$DO_CLAUDE" -eq 1 ] && has claude; then
+  say "如需配置第三方 API/模型：clenv config api <url> --global；clenv config model <name> --global"
+fi
+
 # ---- 可选：部署环境 ----
 if [ "${#ENVS[@]}" -gt 0 ]; then
   say "部署环境：${ENVS[*]}"
@@ -134,6 +223,7 @@ fi
 echo
 ok "安装完成！"
 echo "  验证：  clenv doctor"
+has claude && echo "  Claude Code：$(claude --version 2>/dev/null || echo 已安装)（配置：clenv config api <url> --global）"
 echo "  装环境：clenv env install ffmpeg jq gh   或   setup-environments.sh lang codec"
 echo "  初始化项目：clenv init my-project --permissions standard --mcp all"
 [ "$DO_PATH" -eq 1 ] && case ":$PATH:" in *":$PREFIX:"*) : ;; *) echo "  （先执行： export PATH=\"$PREFIX:\$PATH\"  使本终端立即生效）";; esac

@@ -29,8 +29,32 @@ curl -fsSL https://raw.githubusercontent.com/CyberNova2333/claude-enviroment-for
 clenv doctor
 ```
 
-`install.sh` 选项：`--envs <分类/项目…>`、`--prefix <目录>`、`--copy`（复制而非软链）、
-`--no-path`。
+### 自动检测并安装 Claude Code
+
+`install.sh` 默认会**检测 Claude Code 是否已安装**；若未安装，则自动装好前置环境
+（curl / Node.js）并安装 Claude Code——优先用官方原生安装脚本
+（`curl -fsSL https://claude.ai/install.sh | bash`），失败再回退 `npm install -g @anthropic-ai/claude-code`。
+可用 `--no-claude` 跳过这一步。
+
+同时可在安装时**一并配置 Claude Code 全局环境变量**（写入 `~/.claude/settings.json` 的 `env`）：
+
+```bash
+# 安装命令 + 安装 Claude Code + 配置第三方 API 地址与默认模型
+bash install.sh --api https://your-gateway/v1 --model claude-sonnet-5 --token <令牌>
+```
+
+`install.sh` 选项：
+
+| 选项 | 作用 |
+|---|---|
+| `--envs <分类/项目…>` | 安装完命令后顺带部署这些环境 |
+| `--prefix <目录>` | 命令软链目录（默认 `~/.local/bin`） |
+| `--copy` | 复制而非软链 clenv（脱离仓库也能跑） |
+| `--no-path` | 不改动 shell rc 的 PATH |
+| `--no-claude` | 跳过「检测并自动安装 Claude Code」 |
+| `--api <url>` | 配置全局 `ANTHROPIC_BASE_URL` |
+| `--model <name>` | 配置全局 `ANTHROPIC_MODEL` |
+| `--token <token>` | 配置全局 `ANTHROPIC_AUTH_TOKEN`（明文写入用户级设置） |
 
 ---
 
@@ -144,7 +168,8 @@ clenv config permissions loose             # init 默认权限模板
 
 见顶部「一键安装」。它负责：把 `clenv`、`setup-environments.sh` 软链（或复制）到
 `~/.local/bin`、写入 PATH、把仓库根记录进 `~/.config/clenv/config.json`（让 `clenv` 在
-任意目录都能找到模板与 MCP），并可选顺带部署环境。
+任意目录都能找到模板与 MCP）、**检测并按需自动安装 Claude Code 及其前置环境、配置全局
+API/模型/令牌**，并可选顺带部署环境。
 
 ---
 
