@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash -n:*)",
+      "Bash(python3 -m py_compile:*)",
+      "Bash(shellcheck:*)",
+      "Bash(clenv:*)",
+      "Bash(./bin/clenv:*)",
+      "Bash(setup-environments.sh:*)",
+      "Bash(bash scripts/setup-environments.sh:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Read(*)",
+      "Edit(*)",
+      "Write(*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(rm:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /:*)",
+      "Bash(sudo rm:*)",
+      "Read(./.claude/settings.local.json)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/doc-sync-check.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
