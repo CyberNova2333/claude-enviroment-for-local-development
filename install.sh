@@ -18,15 +18,21 @@
 #   --no-claude           跳过「检测并自动安装 Claude Code」这一步
 #   --api <url>           配置 Claude Code 全局 API 地址（ANTHROPIC_BASE_URL）
 #   --model <name>        配置 Claude Code 全局默认模型（ANTHROPIC_MODEL）
-#   --token <token>       配置 Claude Code 全局令牌（ANTHROPIC_AUTH_TOKEN，明文写入用户级设置）
+#   --token <token>       配置全局令牌（ANTHROPIC_AUTH_TOKEN，明文写入用户级设置）
+#   --model <name>        配置全局默认模型（ANTHROPIC_MODEL）
+#   --opus-model <name>   配置 ANTHROPIC_DEFAULT_OPUS_MODEL
+#   --sonnet-model <name> 配置 ANTHROPIC_DEFAULT_SONNET_MODEL
+#   --haiku-model <name>  配置 ANTHROPIC_DEFAULT_HAIKU_MODEL
+#   --subagent-model <n>  配置 CLAUDE_CODE_SUBAGENT_MODEL
+#   --effort <level>      配置 CLAUDE_CODE_EFFORT_LEVEL（low/medium/high）
 #   --silent, -s          静默：不做任何交互式询问（适合 curl|bash / CI），也不自动刷新 shell
 #   --no-refresh          配置完成后不自动刷新（不 exec 新的登录 shell）
 #   -h, --help
 #
 # 默认行为：安装 clenv 后自动检测 Claude Code 是否已安装；未安装则装前置环境（Node/curl）
 # 并安装 Claude Code。随后：
-#   * 若给了 --api/--model/--token → 直接写入全局设置（非交互）；
-#   * 否则在**交互式终端**下询问「是否现在配置 API 地址/模型」，选是则逐项交互录入并写入，
+#   * 若通过命令行给了任意 --api/--token/--model/--*-model/--effort → 直接写入全局设置（非交互）；
+#   * 否则在**交互式终端**下询问「是否现在配置 API 地址/模型等」，选是则逐项交互录入并写入，
 #     完成后自动刷新 shell（exec 登录 shell）使 PATH 与配置立即生效；
 #   * --silent 则完全跳过上述询问与刷新。
 set -uo pipefail
@@ -38,10 +44,30 @@ DO_PATH=1
 DO_CLAUDE=1
 SILENT=0
 DO_REFRESH=1
-OPT_API=""
-OPT_MODEL=""
-OPT_TOKEN=""
 ENVS=()
+
+# ---- 可配置的 Claude Code 环境变量表（顺序即交互录入顺序）----
+# 下标对齐：CFG_SUB=clenv 子命令，CFG_DESC=交互提示，CFG_SECRET=是否隐藏输入，CFG_VAL=收集到的值
+CFG_SUB=(api            token          model            opus-model                    sonnet-model                    haiku-model                    subagent-model               effort)
+CFG_DESC=("第三方 API 地址 ANTHROPIC_BASE_URL" \
+          "令牌 ANTHROPIC_AUTH_TOKEN（输入不回显）" \
+          "默认模型 ANTHROPIC_MODEL" \
+          "Opus 档模型 ANTHROPIC_DEFAULT_OPUS_MODEL" \
+          "Sonnet 档模型 ANTHROPIC_DEFAULT_SONNET_MODEL" \
+          "Haiku 档模型 ANTHROPIC_DEFAULT_HAIKU_MODEL" \
+          "子代理模型 CLAUDE_CODE_SUBAGENT_MODEL" \
+          "努力级别 CLAUDE_CODE_EFFORT_LEVEL（low/medium/high）")
+CFG_ENV=(ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_EFFORT_LEVEL)
+CFG_SECRET=(0 1 0 0 0 0 0 0)
+CFG_VAL=("" "" "" "" "" "" "" "")
+
+# 把命令行 --flag 值写进对应下标
+_set_cfg() { # _set_cfg <子命令名> <值>
+  local i
+  for i in "${!CFG_SUB[@]}"; do
+    [ "${CFG_SUB[$i]}" = "$1" ] && { CFG_VAL[$i]="$2"; return 0; }
+  done
+}
 
 # ---- 解析参数 ----
 while [ $# -gt 0 ]; do
@@ -51,12 +77,17 @@ while [ $# -gt 0 ]; do
     --copy)   DO_COPY=1; shift;;
     --no-path) DO_PATH=0; shift;;
     --no-claude) DO_CLAUDE=0; shift;;
-    --api)    OPT_API="$2"; shift 2;;
-    --model)  OPT_MODEL="$2"; shift 2;;
-    --token)  OPT_TOKEN="$2"; shift 2;;
+    --api)            _set_cfg api "$2"; shift 2;;
+    --token)          _set_cfg token "$2"; shift 2;;
+    --model)          _set_cfg model "$2"; shift 2;;
+    --opus-model)     _set_cfg opus-model "$2"; shift 2;;
+    --sonnet-model)   _set_cfg sonnet-model "$2"; shift 2;;
+    --haiku-model)    _set_cfg haiku-model "$2"; shift 2;;
+    --subagent-model) _set_cfg subagent-model "$2"; shift 2;;
+    --effort)         _set_cfg effort "$2"; shift 2;;
     --silent|-s) SILENT=1; shift;;
     --no-refresh) DO_REFRESH=0; shift;;
-    -h|--help) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "未知选项：$1"; exit 2;;
   esac
 done
@@ -219,42 +250,43 @@ else
   say "按 --no-claude，跳过 Claude Code 检测/安装。"
 fi
 
-# ---- 配置 Claude Code 全局环境变量（API 地址/模型/令牌）----
+# ---- 配置 Claude Code 全局环境变量（覆盖 API/令牌/各档模型/子代理模型/努力级别）----
 NEED_REFRESH=0
+cfg_has_values() { local v; for v in "${CFG_VAL[@]}"; do [ -n "$v" ] && return 0; done; return 1; }
 configure_claude_env() {
-  local cli="$PREFIX/clenv"
+  local cli="$PREFIX/clenv" i
   has "$cli" || cli="clenv"
-  [ -n "$OPT_API" ]   && "$cli" config api   "$OPT_API"   --global
-  [ -n "$OPT_MODEL" ] && "$cli" config model "$OPT_MODEL" --global
-  [ -n "$OPT_TOKEN" ] && "$cli" config token "$OPT_TOKEN" --global
-  # 同时导出到本进程环境，供随后 exec 的登录 shell 继承，立即生效
-  [ -n "$OPT_API" ]   && export ANTHROPIC_BASE_URL="$OPT_API"
-  [ -n "$OPT_MODEL" ] && export ANTHROPIC_MODEL="$OPT_MODEL"
-  [ -n "$OPT_TOKEN" ] && export ANTHROPIC_AUTH_TOKEN="$OPT_TOKEN"
+  for i in "${!CFG_SUB[@]}"; do
+    [ -n "${CFG_VAL[$i]}" ] || continue
+    "$cli" config "${CFG_SUB[$i]}" "${CFG_VAL[$i]}" --global
+    # 同时导出到本进程环境，供随后 exec 的登录 shell 继承，立即生效
+    export "${CFG_ENV[$i]}=${CFG_VAL[$i]}"
+  done
 }
 
-# 交互式询问是否配置，并逐项录入
+# 交互式询问是否配置，并逐项录入（全部环境变量）
 prompt_configure_claude() {
-  local ans v
-  printf '\033[34m[?]\033[0m 是否现在配置 Claude Code 的 API 地址 / 模型等全局设置？[y/N] '
+  local ans v i
+  printf '\033[34m[?]\033[0m 是否现在配置 Claude Code 的 API 地址 / 模型 / 努力级别等全局设置？[y/N] '
   ask ans
   case "$ans" in
     y|Y|yes|YES|是) ;;
-    *) say "跳过 Claude Code 配置（以后可随时 clenv config api <url> --global）。"; return 0;;
+    *) say "跳过 Claude Code 配置（以后可随时 clenv config <项> <值> --global）。"; return 0;;
   esac
-  printf '  第三方 API 地址（ANTHROPIC_BASE_URL，回车跳过）: '; ask v; [ -n "$v" ] && OPT_API="$v"
-  printf '  默认模型名（ANTHROPIC_MODEL，回车跳过）: ';           ask v; [ -n "$v" ] && OPT_MODEL="$v"
-  printf '  令牌（ANTHROPIC_AUTH_TOKEN，回车跳过；输入不回显）: '; ask v secret; [ -n "$v" ] && OPT_TOKEN="$v"
-  if [ -z "$OPT_API$OPT_MODEL$OPT_TOKEN" ]; then
-    say "未输入任何值，跳过配置。"; return 0
-  fi
+  say "逐项录入（每项回车即跳过）："
+  for i in "${!CFG_SUB[@]}"; do
+    printf '  %s: ' "${CFG_DESC[$i]}"
+    if [ "${CFG_SECRET[$i]}" = 1 ]; then ask v secret; else ask v; fi
+    [ -n "$v" ] && CFG_VAL[$i]="$v"
+  done
+  if ! cfg_has_values; then say "未输入任何值，跳过配置。"; return 0; fi
   say "写入全局设置（~/.claude/settings.json 的 env）…"
   configure_claude_env
   NEED_REFRESH=1
 }
 
-if [ -n "$OPT_API$OPT_MODEL$OPT_TOKEN" ]; then
-  # 命令行已给出 → 非交互直接写入
+if cfg_has_values; then
+  # 命令行已给出任意配置 → 非交互直接写入
   say "配置 Claude Code 全局设置（写入 ~/.claude/settings.json 的 env）…"
   configure_claude_env
 elif [ "$SILENT" -eq 1 ]; then

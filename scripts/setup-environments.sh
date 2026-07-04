@@ -12,6 +12,7 @@
 #   setup-environments.sh all                   安装全部（较重，慎用）
 #   setup-environments.sh lang codec            安装若干分类
 #   setup-environments.sh python go ffmpeg jq   安装若干单项
+#   setup-environments.sh go@1.21.0 node@20     指定精确版本（name@version，部分项支持）
 #   setup-environments.sh doctor                只检测、不安装，打印各项版本
 #   setup-environments.sh --help
 #
@@ -31,8 +32,33 @@ ensure_path "$BIN_DIR"
 
 FAILED=()   # 收集失败项
 DONE=()     # 收集成功/已存在项
+REQ_VER=""  # 当前项请求的精确版本（由 name@version 解析，仅部分项支持）
 _mark_ok()   { DONE+=("$1"); }
 _mark_fail() { FAILED+=("$1"); }
+# 支持 @版本 精确安装的项（其余项 @版本 会被忽略并提示）
+VERSIONED_ITEMS="node nodejs go golang rust rustc yq apktool jadx dex2jar glab gitlab ruff pytest frida"
+
+# 下载类工具的成功判定：指定了版本时，必须确认产物已落到 BIN_DIR（避免系统里已有同名
+# 命令导致「下载失败却误报成功」）；未指定版本时按命令是否存在判定。
+_bin_ok() { # _bin_ok <BIN_DIR内文件名/命令名> <展示名>
+  if [ -n "$REQ_VER" ]; then
+    [ -e "$BIN_DIR/$1" ] && _mark_ok "$2 $REQ_VER" || _mark_fail "$2@$REQ_VER(获取失败，可能网络受限)"
+  else
+    has "$1" && _mark_ok "$2" || _mark_fail "$2"
+  fi
+}
+# 版本号校验型判定：指定版本时，要求实际版本输出包含 REQ_VER；否则只看命令是否存在。
+_ver_ok() { # _ver_ok <命令名> <展示名> <探测命令...>
+  local cmd="$1" name="$2"; shift 2
+  if [ -n "$REQ_VER" ]; then
+    case "$("$@" 2>&1)" in
+      *"$REQ_VER"*) _mark_ok "$name $REQ_VER";;
+      *) _mark_fail "$name@$REQ_VER(未达期望版本，可能网络受限)";;
+    esac
+  else
+    has "$cmd" && _mark_ok "$name" || _mark_fail "$name"
+  fi
+}
 
 # 下载助手：curl 优先，回退 wget；网络失败按 2/4/8s 退避重试至多 3 次（健壮性）。
 fetch() { # fetch <url> <dest>
@@ -79,41 +105,54 @@ install_python() {
 }
 
 install_node() {
-  if has node; then _mark_ok "node ($(node -v))"; return; fi
-  # 优先系统包；失败再用 nvm
-  if pkg_install nodejs npm && has node; then _mark_ok node; return; fi
-  log "系统包安装 node 失败，改用 nvm…"
+  if [ -z "$REQ_VER" ] && has node; then _mark_ok "node ($(node -v))"; return; fi
+  # 未指定版本时优先系统包；指定版本或系统包失败则用 nvm
+  if [ -z "$REQ_VER" ] && pkg_install nodejs npm && has node; then _mark_ok node; return; fi
+  [ -n "$REQ_VER" ] && log "用 nvm 安装 node@$REQ_VER" || log "系统包安装 node 失败，改用 nvm…"
   export NVM_DIR="$HOME/.nvm"
   if [ ! -s "$NVM_DIR/nvm.sh" ]; then
     fetch "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh" "$OPT_DIR/nvm-install.sh" \
       && bash "$OPT_DIR/nvm-install.sh" >/dev/null 2>&1
   fi
   # shellcheck disable=SC1091
-  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm install --lts >/dev/null 2>&1
-  has node && _mark_ok "node (via nvm)" || _mark_fail node
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    . "$NVM_DIR/nvm.sh"
+    if [ -n "$REQ_VER" ]; then nvm install "$REQ_VER" >/dev/null 2>&1; else nvm install --lts >/dev/null 2>&1; fi
+    # 把当前 node/npm 软链到 BIN_DIR，便于后续直接调用
+    command -v node >/dev/null 2>&1 && ln -sf "$(command -v node)" "$BIN_DIR/node" 2>/dev/null
+    command -v npm  >/dev/null 2>&1 && ln -sf "$(command -v npm)"  "$BIN_DIR/npm"  2>/dev/null
+  fi
+  _ver_ok node "node" node -v
 }
 
 install_go() {
-  if has go; then _mark_ok "go ($(go version 2>&1 | awk '{print $3}'))"; return; fi
-  if pkg_install golang-go && has go; then _mark_ok go; return; fi
-  # 官方 tar 包（amd64/arm64）
-  local arch ver="1.22.5" tgz
+  if [ -z "$REQ_VER" ] && has go; then _mark_ok "go ($(go version 2>&1 | awk '{print $3}'))"; return; fi
+  if [ -z "$REQ_VER" ] && pkg_install golang-go && has go; then _mark_ok go; return; fi
+  # 官方 tar 包（amd64/arm64）；REQ_VER 形如 1.21.0
+  local arch ver="${REQ_VER:-1.22.5}" tgz
   case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) _mark_fail "go(未知架构)"; return;; esac
   tgz="$OPT_DIR/go.tgz"
   fetch "https://go.dev/dl/go${ver}.linux-${arch}.tar.gz" "$tgz" \
     && rm -rf "$OPT_DIR/go" && tar -C "$OPT_DIR" -xzf "$tgz" \
     && ln -sf "$OPT_DIR/go/bin/go" "$BIN_DIR/go" && ln -sf "$OPT_DIR/go/bin/gofmt" "$BIN_DIR/gofmt"
-  has go && _mark_ok "go (官方包 $ver)" || _mark_fail go
+  _bin_ok go "go"
 }
 
 install_rust() {
-  if has rustc; then _mark_ok "rust ($(rustc --version 2>&1 | awk '{print $2}'))"; return; fi
-  if fetch "https://sh.rustup.rs" "$OPT_DIR/rustup.sh"; then
-    sh "$OPT_DIR/rustup.sh" -y --no-modify-path >/dev/null 2>&1
-    [ -f "$HOME/.cargo/bin/rustc" ] && ln -sf "$HOME/.cargo/bin/"* "$BIN_DIR/" 2>/dev/null
-    ensure_path "$HOME/.cargo/bin"
+  if [ -z "$REQ_VER" ] && has rustc; then _mark_ok "rust ($(rustc --version 2>&1 | awk '{print $2}'))"; return; fi
+  if ! has rustup; then
+    if fetch "https://sh.rustup.rs" "$OPT_DIR/rustup.sh"; then
+      sh "$OPT_DIR/rustup.sh" -y --no-modify-path >/dev/null 2>&1
+      [ -f "$HOME/.cargo/bin/rustc" ] && ln -sf "$HOME/.cargo/bin/"* "$BIN_DIR/" 2>/dev/null
+      ensure_path "$HOME/.cargo/bin"
+    fi
   fi
-  has rustc && _mark_ok "rust (rustup)" || _mark_fail rust
+  # 指定版本：用 rustup 安装并设为默认（REQ_VER 形如 1.79.0 或 stable/beta）
+  if [ -n "$REQ_VER" ] && has rustup; then
+    rustup toolchain install "$REQ_VER" >/dev/null 2>&1 && rustup default "$REQ_VER" >/dev/null 2>&1
+    ln -sf "$HOME/.cargo/bin/"* "$BIN_DIR/" 2>/dev/null
+  fi
+  _ver_ok rustc "rust" rustc --version
 }
 
 install_java() {
@@ -139,12 +178,13 @@ install_imagemagick() {
 }
 install_jq()   { ensure_cmd jq jq && _mark_ok jq || _mark_fail jq; }
 install_yq()   {
-  if has yq; then _mark_ok yq; return; fi
-  # yq(mikefarah) 单文件二进制
-  local arch; case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) arch=amd64;; esac
-  fetch "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}" "$BIN_DIR/yq" \
-    && chmod +x "$BIN_DIR/yq"
-  has yq && _mark_ok yq || _mark_fail yq
+  if [ -z "$REQ_VER" ] && has yq; then _mark_ok yq; return; fi
+  # yq(mikefarah) 单文件二进制；REQ_VER 形如 4.44.3
+  local arch url; case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) arch=amd64;; esac
+  if [ -n "$REQ_VER" ]; then url="https://github.com/mikefarah/yq/releases/download/v${REQ_VER}/yq_linux_${arch}"
+  else url="https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}"; fi
+  fetch "$url" "$BIN_DIR/yq" && chmod +x "$BIN_DIR/yq"
+  _bin_ok yq "yq"
 }
 install_pandoc()  { ensure_cmd pandoc pandoc && _mark_ok pandoc || _mark_fail pandoc; }
 install_7z()      {
@@ -185,17 +225,17 @@ install_file()      { ensure_cmd file file && _mark_ok file || _mark_fail file; 
 
 # ============================ reverse：逆向工具 ============================
 install_apktool() {
-  if has apktool; then _mark_ok apktool; return; fi
+  if [ -z "$REQ_VER" ] && has apktool; then _mark_ok apktool; return; fi
   has java || install_java
-  local jar="$OPT_DIR/apktool.jar"
-  fetch "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.9.3.jar" "$jar" \
+  local jar="$OPT_DIR/apktool.jar" ver="${REQ_VER:-2.9.3}"
+  fetch "https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_${ver}.jar" "$jar" \
     && make_jar_wrapper apktool "$jar"
-  has apktool && _mark_ok "apktool 2.9.3" || _mark_fail apktool
+  _bin_ok apktool "apktool"
 }
 install_jadx() {
-  if has jadx; then _mark_ok jadx; return; fi
+  if [ -z "$REQ_VER" ] && has jadx; then _mark_ok jadx; return; fi
   has java || install_java
-  local zip="$OPT_DIR/jadx.zip" ver="1.5.0"
+  local zip="$OPT_DIR/jadx.zip" ver="${REQ_VER:-1.5.0}"
   if fetch "https://github.com/skylot/jadx/releases/download/v${ver}/jadx-${ver}.zip" "$zip"; then
     rm -rf "$OPT_DIR/jadx" && mkdir -p "$OPT_DIR/jadx" \
       && (has unzip || pkg_install unzip) \
@@ -203,12 +243,12 @@ install_jadx() {
       && ln -sf "$OPT_DIR/jadx/bin/jadx" "$BIN_DIR/jadx" \
       && ln -sf "$OPT_DIR/jadx/bin/jadx-gui" "$BIN_DIR/jadx-gui" 2>/dev/null
   fi
-  has jadx && _mark_ok "jadx $ver" || _mark_fail jadx
+  _bin_ok jadx "jadx"
 }
 install_dex2jar() {
-  if has d2j-dex2jar || has d2j-dex2jar.sh; then _mark_ok dex2jar; return; fi
+  if [ -z "$REQ_VER" ] && { has d2j-dex2jar || has d2j-dex2jar.sh; }; then _mark_ok dex2jar; return; fi
   has java || install_java
-  local zip="$OPT_DIR/dex2jar.zip" ver="2.4" d
+  local zip="$OPT_DIR/dex2jar.zip" ver="${REQ_VER:-2.4}" d
   if fetch "https://github.com/pxb1988/dex2jar/releases/download/v${ver}/dex-tools-v${ver}.zip" "$zip"; then
     has unzip || pkg_install unzip
     rm -rf "$OPT_DIR/dex2jar"
@@ -220,7 +260,7 @@ install_dex2jar() {
       fi
     fi
   fi
-  has d2j-dex2jar && _mark_ok "dex2jar $ver" || _mark_fail dex2jar
+  _bin_ok d2j-dex2jar "dex2jar"
 }
 install_radare2() {
   if has r2 || has radare2; then _mark_ok radare2; return; fi
@@ -233,10 +273,10 @@ install_binwalk() {
   has binwalk && _mark_ok binwalk || _mark_fail binwalk
 }
 install_frida() {
-  if has frida; then _mark_ok frida; return; fi
+  if [ -z "$REQ_VER" ] && has frida; then _mark_ok frida; return; fi
   has python3 || install_python
-  python3 -m pip install --user frida-tools >/dev/null 2>&1
-  has frida && _mark_ok "frida-tools" || _mark_fail frida
+  python3 -m pip install --user "frida-tools${REQ_VER:+==$REQ_VER}" >/dev/null 2>&1
+  _ver_ok frida "frida-tools" frida --version
 }
 install_binutils() { # 提供 objdump/nm/readelf/strings
   if has readelf && has objdump && has strings; then _mark_ok binutils; return; fi
@@ -257,16 +297,16 @@ install_checksec() {
 # ============================ devtools：开发辅助 =========================
 install_shellcheck() { ensure_cmd shellcheck shellcheck && _mark_ok shellcheck || _mark_fail shellcheck; }
 install_ruff() {
-  if has ruff; then _mark_ok ruff; return; fi
+  if [ -z "$REQ_VER" ] && has ruff; then _mark_ok ruff; return; fi
   has python3 || install_python
-  python3 -m pip install --user ruff >/dev/null 2>&1
-  has ruff && _mark_ok ruff || _mark_fail ruff
+  python3 -m pip install --user "ruff${REQ_VER:+==$REQ_VER}" >/dev/null 2>&1
+  _ver_ok ruff "ruff" ruff --version
 }
 install_pytest() {
-  if has pytest; then _mark_ok pytest; return; fi
+  if [ -z "$REQ_VER" ] && has pytest; then _mark_ok pytest; return; fi
   has python3 || install_python
-  python3 -m pip install --user pytest >/dev/null 2>&1
-  has pytest && _mark_ok pytest || _mark_fail pytest
+  python3 -m pip install --user "pytest${REQ_VER:+==$REQ_VER}" >/dev/null 2>&1
+  _ver_ok pytest "pytest" pytest --version
 }
 
 # ============================ vcs：代码平台工具 ============================
@@ -291,14 +331,14 @@ install_gh() {
   has gh && _mark_ok gh || _mark_fail gh
 }
 install_glab() {
-  if has glab; then _mark_ok glab; return; fi
-  local arch ver="1.44.0" tgz; case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) arch=amd64;; esac
+  if [ -z "$REQ_VER" ] && has glab; then _mark_ok glab; return; fi
+  local arch ver="${REQ_VER:-1.44.0}" tgz; case "$(uname -m)" in x86_64) arch=amd64;; aarch64|arm64) arch=arm64;; *) arch=amd64;; esac
   tgz="$OPT_DIR/glab.tgz"
   if fetch "https://gitlab.com/gitlab-org/cli/-/releases/v${ver}/downloads/glab_${ver}_linux_${arch}.tar.gz" "$tgz"; then
     rm -rf "$OPT_DIR/glab" && mkdir -p "$OPT_DIR/glab" && tar -C "$OPT_DIR/glab" -xzf "$tgz" \
       && ln -sf "$(find "$OPT_DIR/glab" -type f -name glab | head -n1)" "$BIN_DIR/glab"
   fi
-  has glab && _mark_ok "glab $ver" || _mark_fail glab
+  _bin_ok glab "glab"
 }
 
 # ============================ 分类映射 =====================================
@@ -309,9 +349,18 @@ VCS_ITEMS="git gh glab curl wget"
 DEVTOOLS_ITEMS="shellcheck ruff pytest"
 ALL_ITEMS="$LANG_ITEMS $CODEC_ITEMS $REVERSE_ITEMS $VCS_ITEMS $DEVTOOLS_ITEMS"
 
-# 把单项名映射到安装函数
+# 把单项名映射到安装函数。支持 name@version（仅 VERSIONED_ITEMS 内的项生效）。
 install_item() {
-  case "$1" in
+  local raw="$1" name ver=""
+  case "$raw" in *@*) name="${raw%@*}"; ver="${raw#*@}";; *) name="$raw";; esac
+  REQ_VER="$ver"
+  if [ -n "$REQ_VER" ]; then
+    case " $VERSIONED_ITEMS " in
+      *" $name "*) log "$name：请求精确版本 @$REQ_VER";;
+      *) warn "$name 暂不支持 @版本 精确安装（仅能装系统包/仓库版本），已忽略 @$REQ_VER。"; REQ_VER="";;
+    esac
+  fi
+  case "$name" in
     python|python3) install_python;;
     node|nodejs)    install_node;;
     go|golang)      install_go;;
@@ -349,8 +398,9 @@ install_item() {
     glab|gitlab)    install_glab;;
     curl)           install_curl;;
     wget)           install_wget;;
-    *) err "未知项：$1"; _mark_fail "$1"; return 1;;
+    *) err "未知项：$name"; _mark_fail "$name"; REQ_VER=""; return 1;;
   esac
+  REQ_VER=""
 }
 
 install_category() {
@@ -400,7 +450,11 @@ do_list() {
   printf '  %-9s %s\n' "vcs"      "$VCS_ITEMS"
   printf '  %-9s %s\n' "devtools" "$DEVTOOLS_ITEMS"
   echo
-  echo "示例：setup-environments.sh lang codec   或   setup-environments.sh python ffmpeg gh"
+  printf '%b\n' "${C_BOLD}指定版本（name@version）${C_RESET}：支持精确版本的项 → ${C_DIM}$VERSIONED_ITEMS${C_RESET}"
+  echo "  其余项 @version 会被忽略（仅能装系统包/仓库版本）。"
+  echo
+  echo "示例：setup-environments.sh lang codec"
+  echo "      setup-environments.sh go@1.21.0 node@20.11.1 yq@4.44.3"
 }
 
 usage() {

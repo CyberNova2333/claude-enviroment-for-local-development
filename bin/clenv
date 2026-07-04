@@ -379,8 +379,30 @@ def set_claude_env(is_global, key, value):
     return path
 
 
+# config 子命令 -> Claude Code 环境变量名（简单直写型）
+CONFIG_ENV_MAP = {
+    "model": "ANTHROPIC_MODEL",
+    "opus-model": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "sonnet-model": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "haiku-model": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "subagent-model": "CLAUDE_CODE_SUBAGENT_MODEL",
+    "effort": "CLAUDE_CODE_EFFORT_LEVEL",
+    "output-tokens": "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+}
+
+
 def cmd_config(args):
     scope_global = args.global_scope
+    if args.action in CONFIG_ENV_MAP:
+        if not args.value:
+            err("用法：clenv config %s <值> [--global]" % args.action)
+            return 2
+        key = CONFIG_ENV_MAP[args.action]
+        p = set_claude_env(scope_global, key, args.value)
+        ok("已设置 %s=%s -> %s" % (key, args.value, p))
+        if args.action == "effort":
+            info("CLAUDE_CODE_EFFORT_LEVEL 常见取值：low / medium / high（控制思考/推理投入）。")
+        return 0
     if args.action == "show":
         cfg = load_clenv_config()
         print(c("bold", "clenv 配置") + "  (%s)" % clenv_config_path())
@@ -411,13 +433,6 @@ def cmd_config(args):
         ok("已写入 ANTHROPIC_AUTH_TOKEN -> %s" % p)
         warn("令牌以明文存于该 settings.json，请确保它不被提交进任何仓库（已默认忽略 .claude/settings.local.json）。")
         return 0
-    if args.action == "model":
-        if not args.value:
-            err("用法：clenv config model <模型名>")
-            return 2
-        p = set_claude_env(scope_global, "ANTHROPIC_MODEL", args.value)
-        ok("已设置 ANTHROPIC_MODEL=%s -> %s" % (args.value, p))
-        return 0
     if args.action == "context":
         if not args.value:
             err("用法：clenv config context <token 数>")
@@ -425,13 +440,6 @@ def cmd_config(args):
         p = set_claude_env(scope_global, "CLAUDE_CODE_CONTEXT_LENGTH", args.value)
         ok("已设置 CLAUDE_CODE_CONTEXT_LENGTH=%s -> %s" % (args.value, p))
         info("该值供兼容的第三方网关读取以约束上下文窗口；官方后端以模型自身上限为准。")
-        return 0
-    if args.action == "output-tokens":
-        if not args.value:
-            err("用法：clenv config output-tokens <token 数>")
-            return 2
-        p = set_claude_env(scope_global, "CLAUDE_CODE_MAX_OUTPUT_TOKENS", args.value)
-        ok("已设置 CLAUDE_CODE_MAX_OUTPUT_TOKENS=%s -> %s" % (args.value, p))
         return 0
     if args.action == "default-file":
         if not args.value:
@@ -499,8 +507,10 @@ def build_parser():
     pm.add_argument("names", nargs="*", help="add/remove 的服务器名")
 
     pc = sub.add_parser("config", help="管理 Claude Code / clenv 设置")
-    pc.add_argument("action", choices=["show", "api", "token", "model", "context",
-                                        "output-tokens", "default-file", "permissions"])
+    pc.add_argument("action", choices=[
+        "show", "api", "token", "model",
+        "opus-model", "sonnet-model", "haiku-model", "subagent-model",
+        "effort", "context", "output-tokens", "default-file", "permissions"])
     pc.add_argument("value", nargs="?")
     pc.add_argument("--global", dest="global_scope", action="store_true",
                     help="写入 ~/.claude/settings.json（默认写当前项目 .claude/settings.json）")

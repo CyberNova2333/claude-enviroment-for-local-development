@@ -39,15 +39,19 @@ clenv doctor
 同时可在安装时**一并配置 Claude Code 全局环境变量**（写入 `~/.claude/settings.json` 的 `env`）。
 有两种方式：
 
-**① 交互式（默认，在终端里运行时）**：脚本会询问「是否现在配置 API 地址/模型」，选 `y`
-后逐项录入（API 地址、模型名、令牌，令牌输入不回显，留空即跳过该项）；配置完成后
+**① 交互式（默认，在终端里运行时）**：脚本会询问「是否现在配置 API 地址/模型等」，选 `y`
+后**逐项录入全部 8 个变量**（API 地址、令牌、默认模型、Opus/Sonnet/Haiku 档模型、
+子代理模型、努力级别；令牌输入不回显，任一项留空即跳过）；配置完成后
 **自动刷新 shell**（`exec` 登录 shell）使 PATH 与新设置立即生效，无需手动 `source ~/.bashrc`。
 
 **② 非交互（命令行参数 / 自动化）**：直接给出参数则不询问、不刷新：
 
 ```bash
-# 安装命令 + 安装 Claude Code + 配置第三方 API 地址与默认模型
-bash install.sh --api https://your-gateway/v1 --model claude-sonnet-5 --token <令牌>
+# 安装命令 + 安装 Claude Code + 配置第三方网关、默认模型与各档模型
+bash install.sh --api https://your-gateway/v1 --token <令牌> \
+  --model claude-opus-4-8 --opus-model claude-opus-4-8 \
+  --sonnet-model claude-sonnet-5 --haiku-model claude-haiku-4-5 \
+  --subagent-model claude-sonnet-5 --effort high
 
 # 完全静默（curl|bash / CI 场景，绝不弹任何交互）
 curl -fsSL <install.sh-URL> | bash -s -- --silent
@@ -60,16 +64,23 @@ curl -fsSL <install.sh-URL> | bash -s -- --silent
 
 | 选项 | 作用 |
 |---|---|
-| `--envs <分类/项目…>` | 安装完命令后顺带部署这些环境 |
+| `--envs <分类/项目…>` | 安装完命令后顺带部署这些环境（支持 `name@version`） |
 | `--prefix <目录>` | 命令软链目录（默认 `~/.local/bin`） |
 | `--copy` | 复制而非软链 clenv（脱离仓库也能跑） |
 | `--no-path` | 不改动 shell rc 的 PATH |
 | `--no-claude` | 跳过「检测并自动安装 Claude Code」 |
-| `--api <url>` | 配置全局 `ANTHROPIC_BASE_URL`（给出即非交互） |
-| `--model <name>` | 配置全局 `ANTHROPIC_MODEL`（给出即非交互） |
-| `--token <token>` | 配置全局 `ANTHROPIC_AUTH_TOKEN`（明文写入用户级设置） |
+| `--api <url>` | `ANTHROPIC_BASE_URL` |
+| `--token <token>` | `ANTHROPIC_AUTH_TOKEN`（明文写入用户级设置） |
+| `--model <name>` | `ANTHROPIC_MODEL` |
+| `--opus-model <name>` | `ANTHROPIC_DEFAULT_OPUS_MODEL` |
+| `--sonnet-model <name>` | `ANTHROPIC_DEFAULT_SONNET_MODEL` |
+| `--haiku-model <name>` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` |
+| `--subagent-model <name>` | `CLAUDE_CODE_SUBAGENT_MODEL` |
+| `--effort <level>` | `CLAUDE_CODE_EFFORT_LEVEL`（low/medium/high） |
 | `--silent` / `-s` | 静默：不做任何交互式询问，也不自动刷新 shell |
 | `--no-refresh` | 交互配置后不自动刷新（不 `exec` 新登录 shell） |
+
+> 给出任意一个 `--api/--token/--model/--*-model/--effort` 即视为非交互配置。
 
 ---
 
@@ -106,7 +117,18 @@ setup-environments.sh all                  # 全部（较重）
 ```
 
 特点：自动探测包管理器（apt/dnf/yum/pacman/apk/zypper/brew）；已安装则跳过；
-系统包不可用时回退到官方二进制/tar 包/pip；失败项汇总到末尾，可单独重试。
+系统包不可用时回退到官方二进制/tar 包/pip；下载失败自动退避重试；失败项汇总到末尾，可单独重试。
+
+**指定版本（`name@version`）**：部分项支持精确版本安装 ——
+`node`、`go`、`rust`、`yq`、`apktool`、`jadx`、`dex2jar`、`glab`、`ruff`、`pytest`、`frida`。
+其余项（多为系统包）不支持精确版本，`@version` 会被忽略并提示。
+
+```bash
+setup-environments.sh go@1.21.0 node@20.11.1 yq@4.44.3   # 或 clenv env install go@1.21.0
+```
+
+> 指定版本时，只有产物真正落地/版本号匹配才记为成功；下载受阻会**如实报告失败**，
+> 不会因系统里已有同名旧版本而误报成功。
 
 ---
 
@@ -154,14 +176,19 @@ clenv mcp add lang codec       # 往当前项目 .mcp.json 增加
 clenv mcp remove reverse       # 移除
 
 # Claude Code 设置（默认写当前项目 .claude/settings.json，加 --global 写 ~/.claude）
-clenv config show                          # 查看当前配置
-clenv config api https://your-gateway/v1   # 第三方 API 地址（ANTHROPIC_BASE_URL）
-clenv config token <token>                 # 网关令牌（ANTHROPIC_AUTH_TOKEN，仅写用户级设置）
-clenv config model claude-fable-5          # 默认模型（ANTHROPIC_MODEL）
-clenv config context 200000                # 模型上下文长度（供兼容网关读取）
-clenv config output-tokens 32000           # 最大输出 token
-clenv config default-file AGENTS.md        # init 默认指令文件名
-clenv config permissions loose             # init 默认权限模板
+clenv config show                            # 查看当前配置
+clenv config api https://your-gateway/v1     # ANTHROPIC_BASE_URL
+clenv config token <token>                   # ANTHROPIC_AUTH_TOKEN（仅写用户级设置）
+clenv config model claude-opus-4-8           # ANTHROPIC_MODEL
+clenv config opus-model claude-opus-4-8      # ANTHROPIC_DEFAULT_OPUS_MODEL
+clenv config sonnet-model claude-sonnet-5    # ANTHROPIC_DEFAULT_SONNET_MODEL
+clenv config haiku-model claude-haiku-4-5    # ANTHROPIC_DEFAULT_HAIKU_MODEL
+clenv config subagent-model claude-sonnet-5  # CLAUDE_CODE_SUBAGENT_MODEL
+clenv config effort high                     # CLAUDE_CODE_EFFORT_LEVEL（low/medium/high）
+clenv config context 200000                  # CLAUDE_CODE_CONTEXT_LENGTH（供兼容网关读取）
+clenv config output-tokens 32000             # CLAUDE_CODE_MAX_OUTPUT_TOKENS
+clenv config default-file AGENTS.md          # init 默认指令文件名
+clenv config permissions loose               # init 默认权限模板
 ```
 
 `clenv` 是**自包含单文件**（仅依赖系统 `python3`），内嵌了兜底的 CLAUDE.md/权限模板，
