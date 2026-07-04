@@ -1,0 +1,25 @@
+{
+  "_desc": "standard —— 常规开发：放行常用构建/测试/包管理与本项目工具，破坏性/推送类要问",
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)", "Bash(cat:*)", "Bash(pwd)", "Bash(echo:*)", "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)",
+      "Bash(grep:*)", "Bash(rg:*)", "Bash(find:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(sed:*)", "Bash(awk:*)",
+      "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)", "Bash(git add:*)",
+      "Bash(git checkout:*)", "Bash(git branch:*)", "Bash(git switch:*)", "Bash(git stash:*)",
+      "Bash(python3:*)", "Bash(pip3:*)", "Bash(pip:*)", "Bash(pytest:*)",
+      "Bash(node:*)", "Bash(npm run:*)", "Bash(npm test:*)", "Bash(npm ci:*)", "Bash(npx:*)",
+      "Bash(go build:*)", "Bash(go test:*)", "Bash(go run:*)", "Bash(cargo build:*)", "Bash(cargo test:*)",
+      "Bash(jq:*)", "Bash(yq:*)", "Bash(ffmpeg:*)", "Bash(ffprobe:*)",
+      "Bash(clenv:*)", "Bash(setup-environments.sh:*)",
+      "Read(*)", "Edit(*)", "Write(*)"
+    ],
+    "ask": [
+      "Bash(git push:*)", "Bash(git commit:*)", "Bash(git reset:*)",
+      "Bash(npm install:*)", "Bash(pip install:*)", "Bash(rm:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /:*)", "Bash(sudo rm:*)", "Bash(:(){:|:&};:)",
+      "Read(./.env)", "Read(./.env.*)", "Read(**/secrets/**)", "Read(**/*.pem)", "Read(**/id_rsa)"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "_desc": "loose —— 放手：几乎放行所有 Bash/文件操作，仅拦截极危险与敏感读取（适合可信隔离环境）",
+  "permissions": {
+    "allow": [
+      "Bash(*)", "Read(*)", "Edit(*)", "Write(*)"
+    ],
+    "ask": [
+      "Bash(git push --force:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf /:*)", "Bash(rm -rf /*:*)", "Bash(sudo rm -rf:*)",
+      "Bash(mkfs:*)", "Bash(dd if=:*)", "Bash(:(){:|:&};:)",
+      "Read(**/id_rsa)", "Read(**/*.pem)", "Read(**/secrets/**)"
+    ]
+  }
+}

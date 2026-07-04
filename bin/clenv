@@ -1,0 +1,529 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""clenv —— 本地开发环境统一管理命令。
+
+一个自包含、可移植的单文件工具（仅依赖系统 python3），注册到 PATH 后即可用：
+
+  clenv env      list|doctor|versions|install <项目…>     管理/安装环境
+  clenv venv     create <目录> [--lang python|node]        创建虚拟环境
+  clenv venv     list                                       列出已发现的虚拟环境
+  clenv init     [目录] [--name …] [--permissions …] [--mcp …]   初始化项目目录
+  clenv config   show|api|token|model|context|output-tokens|default-file|permissions
+                                                            管理 Claude Code 设置
+  clenv mcp      list|add <名字…>|remove <名字…>            管理项目 .mcp.json
+  clenv doctor                                              clenv 自身与环境体检
+  clenv --version
+
+设计：所有对 JSON 的改写都「读-合并-写」，保留用户已有键；模板优先用仓库内文件，
+缺失时用本文件内嵌的兜底模板，保证脱离仓库也能工作。
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+VERSION = "1.0.0"
+
+# ------------------------------------------------------------------ 路径解析
+def repo_root():
+    """定位本仓库根目录：环境变量 > clenv 配置 > 由脚本真实路径推断。"""
+    env = os.environ.get("CLENV_REPO")
+    if env and os.path.isdir(env):
+        return env
+    cfg = load_clenv_config()
+    if cfg.get("repo_root") and os.path.isdir(cfg["repo_root"]):
+        return cfg["repo_root"]
+    # bin/clenv -> 上一级即仓库根（解析符号链接）
+    real = os.path.realpath(__file__)
+    guess = os.path.dirname(os.path.dirname(real))
+    return guess
+
+
+def mcp_dir():
+    return os.path.join(repo_root(), "mcp", "servers")
+
+
+def setup_script():
+    return os.path.join(repo_root(), "scripts", "setup-environments.sh")
+
+
+# --------------------------------------------------------------- clenv 配置
+def clenv_config_path():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "clenv", "config.json")
+
+
+def load_clenv_config():
+    p = clenv_config_path()
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_clenv_config(cfg):
+    p = clenv_config_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    return p
+
+
+# ------------------------------------------------------------------ 小工具
+def c(color, text):
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    codes = {"g": "32", "r": "31", "y": "33", "b": "34", "d": "2", "bold": "1"}
+    return "\033[%sm%s\033[0m" % (codes.get(color, "0"), text)
+
+
+def info(msg):  print(c("b", "[*] ") + msg)
+def ok(msg):    print(c("g", "[✓] ") + msg)
+def warn(msg):  print(c("y", "[!] ") + msg, file=sys.stderr)
+def err(msg):   print(c("r", "[✗] ") + msg, file=sys.stderr)
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {} if default is None else default
+
+
+def write_json(path, obj):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def deep_merge(base, over):
+    """把 over 合并进 base（就地）。dict 递归合并，list 去重追加，其它覆盖。"""
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            deep_merge(base[k], v)
+        elif isinstance(v, list) and isinstance(base.get(k), list):
+            for item in v:
+                if item not in base[k]:
+                    base[k].append(item)
+        else:
+            base[k] = v
+    return base
+
+
+# ---------------------------------------------------------- 内嵌兜底模板
+EMBED_PERMS = {
+    "safe": {"permissions": {
+        "allow": ["Bash(ls:*)", "Bash(cat:*)", "Bash(git status:*)", "Bash(git log:*)",
+                  "Bash(git diff:*)", "Read(*)"],
+        "ask": ["Bash(git push:*)", "Bash(git commit:*)"],
+        "deny": ["Bash(rm -rf:*)", "Read(./.env)", "Read(**/*.pem)"]}},
+    "standard": {"permissions": {
+        "allow": ["Bash(ls:*)", "Bash(cat:*)", "Bash(git status:*)", "Bash(git diff:*)",
+                  "Bash(git add:*)", "Bash(python3:*)", "Bash(node:*)", "Bash(go build:*)",
+                  "Bash(cargo build:*)", "Bash(clenv:*)", "Read(*)", "Edit(*)", "Write(*)"],
+        "ask": ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm:*)",
+                "Bash(pip install:*)", "Bash(npm install:*)"],
+        "deny": ["Bash(rm -rf /:*)", "Bash(sudo rm:*)", "Read(./.env)", "Read(**/*.pem)"]}},
+    "loose": {"permissions": {
+        "allow": ["Bash(*)", "Read(*)", "Edit(*)", "Write(*)"],
+        "ask": ["Bash(git push --force:*)"],
+        "deny": ["Bash(rm -rf /:*)", "Bash(mkfs:*)", "Bash(dd if=:*)",
+                 "Read(**/id_rsa)", "Read(**/*.pem)"]}},
+}
+
+EMBED_CLAUDE_TMPL = """# CLAUDE.md — __PROJECT_NAME__（AI 协作者须知）
+
+> 本文件在每次会话开始时自动载入。由 clenv init 生成，可自行增删。
+
+## 项目速览
+- 项目名：__PROJECT_NAME__
+- 说明：__PROJECT_DESC__
+- 技术栈：__PROJECT_STACK__
+
+## 本地环境（clenv 管理）
+- 自检：`clenv env doctor`
+- 装工具：`clenv env install <项目…>`
+- 建虚拟环境：`clenv venv create .venv`
+- MCP 工具见 `.mcp.json`，Claude Code 里用 `/mcp` 查看。
+
+## 协作约定
+- 提交信息用中文，一件事一个 commit。
+- 不要把密钥/令牌/.env 写进仓库。
+- 破坏性操作执行前先确认。
+
+## 允许的命令范围
+见 `.claude/settings.json` 的 permissions（模板：__PERM_TEMPLATE__）。
+"""
+
+MCP_NAMES = ["clenv-lang", "clenv-codec", "clenv-reverse", "clenv-codeplatform"]
+MCP_FILE = {
+    "clenv-lang": "lang_mcp.py",
+    "clenv-codec": "codec_mcp.py",
+    "clenv-reverse": "reverse_mcp.py",
+    "clenv-codeplatform": "codeplatform_mcp.py",
+}
+
+
+def load_perm_template(name):
+    """优先读仓库 templates/permissions/<name>.json，缺失则用内嵌兜底。"""
+    p = os.path.join(repo_root(), "templates", "permissions", "%s.json" % name)
+    data = read_json(p, default=None)
+    if data and "permissions" in data:
+        data.pop("_desc", None)
+        return data
+    if name in EMBED_PERMS:
+        return json.loads(json.dumps(EMBED_PERMS[name]))
+    raise SystemExit("未知权限模板：%s（可选 safe/standard/loose）" % name)
+
+
+def load_claude_tmpl():
+    p = os.path.join(repo_root(), "templates", "CLAUDE.md.tmpl")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:  # noqa: BLE001
+        return EMBED_CLAUDE_TMPL
+
+
+# ===================================================================== env
+def run_setup(args_list):
+    script = setup_script()
+    if not os.path.isfile(script):
+        err("未找到 setup-environments.sh：%s" % script)
+        warn("请设置 CLENV_REPO 指向本仓库，或运行 clenv config show 检查 repo_root。")
+        return 1
+    return subprocess.call(["bash", script] + args_list)
+
+
+def cmd_env(args):
+    if args.action == "list":
+        return run_setup(["list"])
+    if args.action == "doctor":
+        return run_setup(["doctor"])
+    if args.action == "versions":
+        return run_setup(["doctor"])
+    if args.action == "install":
+        if not args.items:
+            err("请给出要安装的项目，如：clenv env install ffmpeg jq gh")
+            return 2
+        return run_setup(list(args.items))
+    err("未知 env 子命令：%s" % args.action)
+    return 2
+
+
+# ==================================================================== venv
+def cmd_venv(args):
+    if args.action == "create":
+        path = args.path
+        if not path:
+            err("请给出虚拟环境目录，如：clenv venv create .venv")
+            return 2
+        if args.lang == "python":
+            if shutil.which("python3") is None:
+                err("未找到 python3，请先 clenv env install python")
+                return 1
+            info("创建 Python venv：%s" % path)
+            rc = subprocess.call(["python3", "-m", "venv", path])
+            if rc == 0:
+                ok("完成。激活：source %s/bin/activate" % path)
+            return rc
+        if args.lang == "node":
+            os.makedirs(path, exist_ok=True)
+            info("在 %s 初始化 Node 项目环境" % path)
+            rc = subprocess.call(["npm", "init", "-y"], cwd=path)
+            if rc == 0:
+                ok("完成。已生成 package.json，本地依赖将装在 %s/node_modules" % path)
+            return rc
+        err("暂不支持的 --lang：%s（可选 python/node）" % args.lang)
+        return 2
+    if args.action == "list":
+        found = []
+        for dirpath, dirnames, filenames in os.walk("."):
+            # 跳过明显的大目录
+            dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules")]
+            if "pyvenv.cfg" in filenames:
+                found.append(dirpath)
+        if found:
+            ok("发现 %d 个 Python 虚拟环境：" % len(found))
+            for f in found:
+                print("  " + f)
+        else:
+            info("当前目录树下未发现 Python 虚拟环境。")
+        return 0
+    err("未知 venv 子命令：%s" % args.action)
+    return 2
+
+
+# ==================================================================== init
+def cmd_init(args):
+    target = os.path.abspath(args.dir or ".")
+    os.makedirs(target, exist_ok=True)
+    claude_dir = os.path.join(target, ".claude")
+    os.makedirs(claude_dir, exist_ok=True)
+
+    cfg = load_clenv_config()
+    name = args.name or os.path.basename(target)
+    claude_file = args.claude_file or cfg.get("default_claude_file", "CLAUDE.md")
+    perm = args.permissions or cfg.get("default_permissions", "standard")
+
+    # 1) 指令文件（CLAUDE.md）
+    tmpl = load_claude_tmpl()
+    content = (tmpl.replace("__PROJECT_NAME__", name)
+                   .replace("__PROJECT_DESC__", args.desc or "（待补充）")
+                   .replace("__PROJECT_STACK__", args.stack or "（待补充）")
+                   .replace("__PERM_TEMPLATE__", perm))
+    claude_path = os.path.join(target, claude_file)
+    if os.path.exists(claude_path) and not args.force:
+        warn("已存在，跳过（--force 覆盖）：%s" % claude_path)
+    else:
+        with open(claude_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        ok("写入指令文件：%s" % claude_path)
+
+    # 2) .claude/settings.json（权限模板，合并保留已有）
+    settings_path = os.path.join(claude_dir, "settings.json")
+    settings = read_json(settings_path, default={})
+    deep_merge(settings, load_perm_template(perm))
+    write_json(settings_path, settings)
+    ok("写入权限设置（模板 %s）：%s" % (perm, settings_path))
+
+    # 3) .mcp.json（选择要接入的 MCP 服务器）
+    chosen = resolve_mcp_selection(args.mcp if args.mcp is not None else cfg.get("default_mcp", "all"))
+    if chosen:
+        mcp_path = os.path.join(target, ".mcp.json")
+        data = read_json(mcp_path, default={})
+        data.setdefault("mcpServers", {})
+        for nm in chosen:
+            data["mcpServers"][nm] = {
+                "command": "python3",
+                "args": [os.path.join(mcp_dir(), MCP_FILE[nm])],
+            }
+        write_json(mcp_path, data)
+        ok("接入 MCP 服务器 %s：%s" % (", ".join(chosen), mcp_path))
+    else:
+        info("未接入任何 MCP 服务器（--mcp none）。")
+
+    print()
+    ok("项目初始化完成：%s" % target)
+    print("  下一步：cd %s && 用 Claude Code 打开；/mcp 可查看已接入工具。" % target)
+    return 0
+
+
+def resolve_mcp_selection(spec):
+    if spec in (None, "", "none"):
+        return []
+    if spec == "all":
+        return list(MCP_NAMES)
+    names = []
+    for raw in str(spec).replace(",", " ").split():
+        nm = raw if raw.startswith("clenv-") else "clenv-" + raw
+        if nm in MCP_NAMES:
+            names.append(nm)
+        else:
+            warn("忽略未知 MCP 名：%s（可选 %s 或 all/none）" % (raw, "/".join(n[6:] for n in MCP_NAMES)))
+    return names
+
+
+# ==================================================================== mcp
+def cmd_mcp(args):
+    if args.action == "list":
+        ok("可用 MCP 服务器：")
+        for nm in MCP_NAMES:
+            path = os.path.join(mcp_dir(), MCP_FILE[nm])
+            mark = c("g", "已就绪") if os.path.isfile(path) else c("y", "缺文件")
+            print("  %-20s %s  %s" % (nm, mark, c("d", path)))
+        return 0
+    mcp_path = os.path.join(os.getcwd(), ".mcp.json")
+    data = read_json(mcp_path, default={})
+    data.setdefault("mcpServers", {})
+    if args.action == "add":
+        chosen = resolve_mcp_selection(" ".join(args.names) if args.names else "all")
+        for nm in chosen:
+            data["mcpServers"][nm] = {"command": "python3",
+                                       "args": [os.path.join(mcp_dir(), MCP_FILE[nm])]}
+        write_json(mcp_path, data)
+        ok("已写入 %s：%s" % (", ".join(chosen) or "（无）", mcp_path))
+        return 0
+    if args.action == "remove":
+        for raw in (args.names or []):
+            nm = raw if raw.startswith("clenv-") else "clenv-" + raw
+            data["mcpServers"].pop(nm, None)
+        write_json(mcp_path, data)
+        ok("已更新：%s" % mcp_path)
+        return 0
+    err("未知 mcp 子命令：%s" % args.action)
+    return 2
+
+
+# ================================================================== config
+def claude_settings_path(is_global):
+    if is_global:
+        return os.path.join(os.path.expanduser("~"), ".claude", "settings.json")
+    return os.path.join(os.getcwd(), ".claude", "settings.json")
+
+
+def set_claude_env(is_global, key, value):
+    path = claude_settings_path(is_global)
+    data = read_json(path, default={})
+    data.setdefault("env", {})
+    if value is None:
+        data["env"].pop(key, None)
+    else:
+        data["env"][key] = str(value)
+    write_json(path, data)
+    return path
+
+
+def cmd_config(args):
+    scope_global = args.global_scope
+    if args.action == "show":
+        cfg = load_clenv_config()
+        print(c("bold", "clenv 配置") + "  (%s)" % clenv_config_path())
+        print(json.dumps(cfg, ensure_ascii=False, indent=2) if cfg else "  (空)")
+        for g in (True, False):
+            path = claude_settings_path(g)
+            data = read_json(path, default=None)
+            label = "全局" if g else "项目"
+            print(c("bold", "\nClaude Code 设置（%s）" % label) + "  (%s)" % path)
+            if data is None:
+                print("  (不存在)")
+            else:
+                print(json.dumps(data.get("env", {}), ensure_ascii=False, indent=2))
+        return 0
+    if args.action == "api":
+        if not args.value:
+            err("用法：clenv config api <base_url> [--global]")
+            return 2
+        p = set_claude_env(scope_global, "ANTHROPIC_BASE_URL", args.value)
+        ok("已设置 ANTHROPIC_BASE_URL=%s -> %s" % (args.value, p))
+        info("第三方网关通常还需令牌：clenv config token <token> [--global]")
+        return 0
+    if args.action == "token":
+        if not args.value:
+            err("用法：clenv config token <token> [--global]")
+            return 2
+        p = set_claude_env(scope_global, "ANTHROPIC_AUTH_TOKEN", args.value)
+        ok("已写入 ANTHROPIC_AUTH_TOKEN -> %s" % p)
+        warn("令牌以明文存于该 settings.json，请确保它不被提交进任何仓库（已默认忽略 .claude/settings.local.json）。")
+        return 0
+    if args.action == "model":
+        if not args.value:
+            err("用法：clenv config model <模型名>")
+            return 2
+        p = set_claude_env(scope_global, "ANTHROPIC_MODEL", args.value)
+        ok("已设置 ANTHROPIC_MODEL=%s -> %s" % (args.value, p))
+        return 0
+    if args.action == "context":
+        if not args.value:
+            err("用法：clenv config context <token 数>")
+            return 2
+        p = set_claude_env(scope_global, "CLAUDE_CODE_CONTEXT_LENGTH", args.value)
+        ok("已设置 CLAUDE_CODE_CONTEXT_LENGTH=%s -> %s" % (args.value, p))
+        info("该值供兼容的第三方网关读取以约束上下文窗口；官方后端以模型自身上限为准。")
+        return 0
+    if args.action == "output-tokens":
+        if not args.value:
+            err("用法：clenv config output-tokens <token 数>")
+            return 2
+        p = set_claude_env(scope_global, "CLAUDE_CODE_MAX_OUTPUT_TOKENS", args.value)
+        ok("已设置 CLAUDE_CODE_MAX_OUTPUT_TOKENS=%s -> %s" % (args.value, p))
+        return 0
+    if args.action == "default-file":
+        if not args.value:
+            err("用法：clenv config default-file <文件名>（如 CLAUDE.md）")
+            return 2
+        cfg = load_clenv_config()
+        cfg["default_claude_file"] = args.value
+        p = save_clenv_config(cfg)
+        ok("已设置 init 默认指令文件名=%s -> %s" % (args.value, p))
+        return 0
+    if args.action == "permissions":
+        if args.value not in ("safe", "standard", "loose"):
+            err("用法：clenv config permissions <safe|standard|loose>")
+            return 2
+        cfg = load_clenv_config()
+        cfg["default_permissions"] = args.value
+        p = save_clenv_config(cfg)
+        ok("已设置 init 默认权限模板=%s -> %s" % (args.value, p))
+        return 0
+    err("未知 config 子命令：%s" % args.action)
+    return 2
+
+
+# ================================================================== doctor
+def cmd_doctor(_args):
+    ok("clenv %s" % VERSION)
+    print("  repo_root : %s" % repo_root())
+    print("  mcp_dir   : %s  %s" % (mcp_dir(),
+          c("g", "存在") if os.path.isdir(mcp_dir()) else c("r", "缺失")))
+    print("  setup.sh  : %s  %s" % (setup_script(),
+          c("g", "存在") if os.path.isfile(setup_script()) else c("r", "缺失")))
+    print("  config    : %s" % clenv_config_path())
+    print()
+    info("环境工具自检：")
+    return run_setup(["doctor"])
+
+
+# ==================================================================== 主入口
+def build_parser():
+    p = argparse.ArgumentParser(prog="clenv", description="本地开发环境统一管理命令")
+    p.add_argument("--version", action="version", version="clenv " + VERSION)
+    sub = p.add_subparsers(dest="cmd")
+
+    pe = sub.add_parser("env", help="管理/安装开发环境")
+    pe.add_argument("action", choices=["list", "doctor", "versions", "install"])
+    pe.add_argument("items", nargs="*", help="install 时的项目名，如 ffmpeg jq gh")
+
+    pv = sub.add_parser("venv", help="创建/列出虚拟环境")
+    pv.add_argument("action", choices=["create", "list"])
+    pv.add_argument("path", nargs="?", help="create 时的目录")
+    pv.add_argument("--lang", default="python", help="python(默认)/node")
+
+    pi = sub.add_parser("init", help="初始化项目目录")
+    pi.add_argument("dir", nargs="?", help="目标目录，默认当前")
+    pi.add_argument("--name")
+    pi.add_argument("--desc")
+    pi.add_argument("--stack")
+    pi.add_argument("--claude-file", dest="claude_file")
+    pi.add_argument("--permissions", choices=["safe", "standard", "loose"])
+    pi.add_argument("--mcp", help="要接入的 MCP：all/none 或逗号分隔（lang,codec,reverse,codeplatform）")
+    pi.add_argument("--force", action="store_true", help="覆盖已存在的指令文件")
+
+    pm = sub.add_parser("mcp", help="管理项目 .mcp.json")
+    pm.add_argument("action", choices=["list", "add", "remove"])
+    pm.add_argument("names", nargs="*", help="add/remove 的服务器名")
+
+    pc = sub.add_parser("config", help="管理 Claude Code / clenv 设置")
+    pc.add_argument("action", choices=["show", "api", "token", "model", "context",
+                                        "output-tokens", "default-file", "permissions"])
+    pc.add_argument("value", nargs="?")
+    pc.add_argument("--global", dest="global_scope", action="store_true",
+                    help="写入 ~/.claude/settings.json（默认写当前项目 .claude/settings.json）")
+
+    sub.add_parser("doctor", help="clenv 自身与环境体检")
+    return p
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.cmd:
+        parser.print_help()
+        return 0
+    dispatch = {
+        "env": cmd_env, "venv": cmd_venv, "init": cmd_init,
+        "mcp": cmd_mcp, "config": cmd_config, "doctor": cmd_doctor,
+    }
+    try:
+        return dispatch[args.cmd](args)
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

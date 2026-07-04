@@ -1,0 +1,36 @@
+# CLAUDE.md — __PROJECT_NAME__（AI 协作者须知）
+
+> 本文件在每次会话开始时被自动载入，约定具有强制性。由 `clenv init` 生成，可自行增删。
+
+## 项目速览
+
+- 项目名：__PROJECT_NAME__
+- 说明：__PROJECT_DESC__
+- 主要语言 / 技术栈：__PROJECT_STACK__
+
+## 本地环境（由 clenv 管理）
+
+本项目的开发/工具环境用 `clenv` 与 `setup-environments.sh` 统一管理：
+
+- 查看环境自检：`clenv env doctor`
+- 安装缺失工具：`clenv env install <项目名…>`（如 `clenv env install ffmpeg jq`）
+- 创建 Python 虚拟环境：`clenv venv create .venv`
+
+可用的 MCP 工具见项目根 `.mcp.json`，在 Claude Code 里用 `/mcp` 查看。
+
+## 协作约定
+
+- 提交信息用**中文**，一件事一个 commit，描述清楚「做了什么、为什么」。
+- 改动代码时，若会让某篇文档过时，请在**同一个 commit** 里一并更新文档。
+- 不要把任何密钥 / 令牌 / `.env` 内容写进仓库或提交历史。
+- 破坏性操作（`rm -rf`、`git push --force`、`git reset --hard`）执行前先确认。
+
+## 允许的命令范围
+
+命令白名单见 `.claude/settings.json` 的 `permissions`。当前模板：**__PERM_TEMPLATE__**。
+如需放宽/收紧，改该文件或重新运行 `clenv init --permissions <safe|standard|loose>`。
+
+## 技术约束
+
+<!-- 在此补充本项目特有的约束，例如最低运行时版本、禁用的 API、构建注入常量等 -->
+- （待补充）
